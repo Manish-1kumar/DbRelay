@@ -7,53 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-### Added
-
-- **Batched acknowledgements** (ADR 0003). "Delivered" outcomes and shutdown releases are written in group-commit batches when
-  the storage provider supports it; both built-in providers do. Batching adds no latency: a lone acknowledgement is written
-  immediately with the single-row statement. Every row is still guarded by its own lock token. It is on by default and can be
-  turned off with `DispatcherOptions.BatchAcknowledgements`. Measured gains are in `docs/benchmarks.md`.
-- **New storage SPI capability `IOutboxBatchStore`** with `OutboxAcknowledgement`. This is an optional interface, so existing
-  `IOutboxStore` implementations keep working unchanged.
-- **New metric `dbrelay.ack.batch_size`.**
-- **Soak/chaos harness `tests/DbRelay.Soak`.** Producers with rollbacks, worker-process kills and graceful stops, database session
-  kills, unreliable handlers, and invariant verification after a drain.
-
-### Changed
-
-- `DbRelay.PostgreSql` now depends on Npgsql 10.0.4 (was 10.0.3).
-- **Payload budgets** (CR-18, ADR 0004).
-  - `EnqueueManyAsync` rejects a call whose serialized payloads total more than 64 MiB, or more than `MaxPayloadBytes` if that
-    is larger.
-  - A claim stops adding messages once their payloads reach 64 MiB; the first message is always claimed. New
-    `OutboxLimits.BatchPayloadBudgetBytes` and init-only `ClaimRequest.MaxPayloadBytes`; custom stores keep compiling, and
-    the conformance suite checks the rule.
-- PostgreSQL `EnqueueManyAsync` writes all messages with one `INSERT ... SELECT FROM unnest(...)` statement instead of one
-  command per row (about 0.4 ms less per 10 messages locally; `docs/benchmarks.md`).
-- **`OutboxQuery.Skip` is limited to 10,000** (CR-21); larger values throw `ArgumentOutOfRangeException`. Narrow the query
-  with filters instead of paging deeper.
-- PostgreSQL admin queries sort only `(created_at, id)` and then fetch the page's rows, as the SQL Server provider does. On a
-  1M-row table, a page at `Skip = 10,000` went from 1.6 s with about 400 MB spilled to disk to 0.5 s in memory.
-
-- **Batch leadership is bounded** (BA-05). A leader writes at most 4 round trips, then hands off to the oldest waiting follower
-  instead of holding its delivery slot for a whole burst.
-- **SQL Server:** passing `transaction: null` while the connection has a transaction in progress now fails with a message that
-  says to pass that transaction (CR-11). The provider-specific behaviour itself is unchanged and documented: PostgreSQL joins
-  the transaction, SQL Server rejects the call.
-
-### Fixed
-
-- **SQL Server deadlocks found by a new stress test** (BA-07).
-  - Two batched acknowledgements for overlapping messages, for example a stale and a current claim, could lock the id index
-    in opposite orders. Items are now sent in SQL Server's `uniqueidentifier` order. PostgreSQL also uses a canonical order,
-    as defence in depth.
-  - The claim's payload-budget read could deadlock with a concurrent acknowledgement under READ COMMITTED. It now uses
-    `READPAST`, like the rest of the claim. This regression was introduced and fixed within this release cycle.
-  - Deadlock victims were always retried, but all three attempts could fail.
-- The abandoned-handler count, used by the health check and the gauge, could be left permanently stale by a race. It is now a
-  single atomic counter.
-
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-11-23
 
 First release.
 
@@ -83,6 +37,36 @@ First release.
 - Samples: PostgreSQL minimal API, SQL Server worker, and an HTTP webhook delivery handler.
 - Documentation: getting started, configuration, architecture, PostgreSQL and SQL Server guides, reliability contract with
   test traceability, troubleshooting, migrating from a hand-rolled outbox, and benchmarks.
+- **Batched acknowledgements** (ADR 0003). "Delivered" outcomes and shutdown releases are written in group-commit batches when
+  the storage provider supports it; both built-in providers do. Batching adds no latency: a lone acknowledgement is written
+  immediately with the single-row statement. Every row is still guarded by its own lock token. It is on by default and can be
+  turned off with `DispatcherOptions.BatchAcknowledgements`. Measured gains are in `docs/benchmarks.md`.
+- **New storage SPI capability `IOutboxBatchStore`** with `OutboxAcknowledgement`. This is an optional interface, so existing
+  `IOutboxStore` implementations keep working unchanged.
+- **New metric `dbrelay.ack.batch_size`.**
+- **Soak/chaos harness `tests/DbRelay.Soak`.** Producers with rollbacks, worker-process kills and graceful stops, database session
+  kills, unreliable handlers, and invariant verification after a drain.
+
+### Behaviour and limits (developed after the release candidate)
+
+- `DbRelay.PostgreSql` depends on Npgsql 10.0.4 or later.
+- **Payload budgets** (CR-18, ADR 0004).
+  - `EnqueueManyAsync` rejects a call whose serialized payloads total more than 64 MiB, or more than `MaxPayloadBytes` if that
+    is larger.
+  - A claim stops adding messages once their payloads reach 64 MiB; the first message is always claimed. New
+    `OutboxLimits.BatchPayloadBudgetBytes` and init-only `ClaimRequest.MaxPayloadBytes`; custom stores keep compiling, and
+    the conformance suite checks the rule.
+- PostgreSQL `EnqueueManyAsync` writes all messages with one `INSERT ... SELECT FROM unnest(...)` statement instead of one
+  command per row (about 0.4 ms less per 10 messages locally; `docs/benchmarks.md`).
+- **`OutboxQuery.Skip` is limited to 10,000** (CR-21); larger values throw `ArgumentOutOfRangeException`. Narrow the query
+  with filters instead of paging deeper.
+- PostgreSQL admin queries sort only `(created_at, id)` and then fetch the page's rows, as the SQL Server provider does. On a
+  1M-row table, a page at `Skip = 10,000` went from 1.6 s with about 400 MB spilled to disk to 0.5 s in memory.
+- **Batch leadership is bounded** (BA-05). A leader writes at most 4 round trips, then hands off to the oldest waiting follower
+  instead of holding its delivery slot for a whole burst.
+- **SQL Server:** passing `transaction: null` while the connection has a transaction in progress now fails with a message that
+  says to pass that transaction (CR-11). The provider-specific behaviour itself is unchanged and documented: PostgreSQL joins
+  the transaction, SQL Server rejects the call.
 
 ### Fixed before release (found by the QA and independent review passes)
 
@@ -96,6 +80,15 @@ First release.
 - Schema and table names with a trailing newline are rejected (CR-02).
 - The PostgreSQL statistics query uses the partial indexes instead of a full table scan, and statistics are only refreshed on
   instances that run the dispatcher (CR-03). Cleanup catches up immediately when it falls behind (CR-04).
+- **SQL Server deadlocks found by a new stress test** (BA-07).
+  - Two batched acknowledgements for overlapping messages, for example a stale and a current claim, could lock the id index
+    in opposite orders. Items are now sent in SQL Server's `uniqueidentifier` order. PostgreSQL also uses a canonical order,
+    as defence in depth.
+  - The claim's payload-budget read could deadlock with a concurrent acknowledgement under READ COMMITTED. It now uses
+    `READPAST`, like the rest of the claim. This regression was introduced and fixed within this release cycle.
+  - Deadlock victims were always retried, but all three attempts could fail.
+- The abandoned-handler count, used by the health check and the gauge, could be left permanently stale by a race. It is now a
+  single atomic counter.
 
 ### Known limitations
 
