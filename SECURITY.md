@@ -16,8 +16,9 @@ Use GitHub's private vulnerability reporting: open the repository's **Security**
 or go directly to <https://github.com/Manish-1kumar/DbRelay/security/advisories/new>. This keeps the report private between
 you and the maintainers until a fix is released.
 
-<!-- TODO(maintainer): private vulnerability reporting can only be enabled once the repository is public (Settings > Code security). Enable it at the same time as making the repository public. -->
-<!-- TODO(maintainer): add a fallback security contact for reporters who cannot use GitHub. -->
+GitHub private vulnerability reporting is the only reporting channel; there is no separate email address.
+
+<!-- Maintainer note: private vulnerability reporting can only be enabled once the repository is public (Settings > Code security). Enable it at the same time as making the repository public (RELEASE_CHECKLIST.md). -->
 
 Please include:
 

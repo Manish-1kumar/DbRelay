@@ -59,8 +59,11 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-<!-- TODO(maintainer): add contact --> [CONTACT TO BE ADDED BY THE MAINTAINERS].
+reported privately to the community leaders responsible for enforcement through GitHub: open the repository's
+**Security** tab, choose **Report a vulnerability**, and start the title with "Code of Conduct report"
+(<https://github.com/Manish-1kumar/DbRelay/security/advisories/new>). Only the maintainers can see these reports.
+For content elsewhere on GitHub you can also use GitHub's own
+[report content](https://docs.github.com/en/communities/maintaining-your-safety-on-github/reporting-abuse-or-spam) feature.
 All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the

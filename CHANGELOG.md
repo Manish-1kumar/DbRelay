@@ -76,4 +76,5 @@ First release.
 
 See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the Limitations section of the [README](README.md#limitations).
 
-<!-- TODO(maintainer): add version comparison links once the repository URL is decided. -->
+[Unreleased]: https://github.com/Manish-1kumar/DbRelay/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Manish-1kumar/DbRelay/releases/tag/v0.1.0

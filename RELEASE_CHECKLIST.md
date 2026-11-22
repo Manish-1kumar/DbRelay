@@ -40,7 +40,8 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 | Push to GitHub and confirm CI is green, including the PostgreSQL 15/16/18 matrix | ✅ |
 | Reserve the `DbRelay.*` ID prefix on nuget.org | 🔒 |
 | Manual trademark search (USPTO/EUIPO/WIPO, classes 9/42) for "DbRelay" (K5) | 🔒 |
-| Fill the `TODO(maintainer)` contact placeholders in CODE_OF_CONDUCT.md and SECURITY.md; enable GitHub private vulnerability reporting | 🔒 |
+| Contacts in CODE_OF_CONDUCT.md and SECURITY.md: GitHub private reporting only, no email (owner decision, 2026-11-22) | ✅ |
+| Enable GitHub private vulnerability reporting (possible only once the repository is public; both contacts depend on it) | 🔒 |
 | Package-specific README with absolute links (`src/PACKAGE_README.md`, packed as README.md; 0 relative links verified) | ✅ |
 | Make the repository public (and enable private vulnerability reporting), tag `v0.1.0`, `dotnet pack -c Release -p:ContinuousIntegrationBuild=true`, publish | 🔒 |
 | Create the GitHub release with CHANGELOG notes | 🔒 |
