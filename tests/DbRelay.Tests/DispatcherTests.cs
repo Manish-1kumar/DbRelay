@@ -289,11 +289,15 @@ public sealed class DispatcherTests
             store.Add($"hang{i}");
         }
 
-        using var release = new ManualResetEventSlim(false);
-        using var host = CreateHost(store, (_, _) =>
+        // The handler ignores cancellation but waits asynchronously. A blocking wait here starved the thread pool when the whole
+        // suite ran in parallel, delaying in-flight abandonment past a fixed settle delay (seen once: 5 orphans after "stable" at 4).
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = 0;
+        using var host = CreateHost(store, async (_, _) =>
         {
-            release.Wait(TimeSpan.FromSeconds(60)); // ignores cancellation
-            return Task.FromResult(DeliveryResult.Delivered());
+            Interlocked.Increment(ref started);
+            await release.Task.WaitAsync(TimeSpan.FromSeconds(60), CancellationToken.None); // ignores cancellation
+            return DeliveryResult.Delivered();
         }, d =>
         {
             d.MaxConcurrency = 2;
@@ -305,19 +309,23 @@ public sealed class DispatcherTests
         var state = host.Services.GetRequiredService<DbRelay.Dispatching.DispatcherState>();
         const int Limit = 4;          // max(2, 2 x MaxConcurrency)
         const int InFlightAtLimit = 2; // MaxConcurrency: handlers already running when the limit is hit may still be abandoned
-        await WaitUntilAsync(() => state.AbandonedHandlers >= Limit);
-        await Task.Delay(800, Ct);     // let in-flight handlers reach their own abandonment
+        // At the limit and settled: no row is Processing, so no delivery is in flight or queued before its handler. (An abandoned
+        // delivery is counted, then rescheduled; a capped batch releases its unstarted rows.) Counting started handlers is not
+        // enough: a delivery that passed the limit check just before the last abandonment may not have invoked its handler yet.
+        await WaitUntilAsync(() =>
+            state.AbandonedHandlers >= Limit && store.CountByStatus().GetValueOrDefault(OutboxMessageStatus.Processing) == 0);
         var claimsAtCap = store.ClaimCalls;
         var orphansAtCap = state.AbandonedHandlers;
         await Task.Delay(1000, Ct);
 
         Assert.InRange(orphansAtCap, Limit, Limit + InFlightAtLimit); // bounded, not growing with messages x attempts
-        Assert.Equal(orphansAtCap, state.AbandonedHandlers);          // stable: nothing new was started
+        Assert.Equal(orphansAtCap, Volatile.Read(ref started));       // stable: no handler was started while at the limit
+        Assert.Equal(orphansAtCap, state.AbandonedHandlers);
         Assert.Equal(claimsAtCap, store.ClaimCalls);                  // no claims while at the limit
         var health = await host.Services.GetRequiredService<HealthCheckService>().CheckHealthAsync(Ct);
         Assert.Equal(HealthStatus.Degraded, health.Status);
 
-        release.Set();
+        release.TrySetResult();
         await WaitUntilAsync(() => state.AbandonedHandlers == 0);
         await WaitUntilAsync(() => store.CountByStatus().GetValueOrDefault(OutboxMessageStatus.Delivered) == 10, 20_000);
         await host.StopAsync(Ct);
@@ -360,13 +368,27 @@ public sealed class DispatcherTests
             store.Add($"m{i}");
         }
 
-        using var host = CreateHost(store, async (_, ct) =>
+        // The in-memory store completes writes instantly, so without help acknowledgements may never overlap (seen on a fast CI
+        // runner: every batch had one item). Hold the leaders' first single-row writes until all 32 in-flight handlers have
+        // finished; the other acknowledgements then queue behind them and must be flushed as multi-item batches.
+        const int concurrency = 32;
+        var completed = 0;
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.BeforeSingleDelivered = () => release.Task;
+
+        using var host = CreateHost(store, async (message, ct) =>
         {
             await Task.Delay(5, ct);
+            if (Interlocked.Increment(ref completed) == concurrency)
+            {
+                // Give the last handlers time to enqueue their acknowledgement after returning.
+                _ = Task.Delay(100, CancellationToken.None).ContinueWith(_ => release.TrySetResult(), TaskScheduler.Default);
+            }
+
             return DeliveryResult.Delivered();
         }, d =>
         {
-            d.MaxConcurrency = 32;
+            d.MaxConcurrency = concurrency;
             d.BatchSize = 300;
         });
 
