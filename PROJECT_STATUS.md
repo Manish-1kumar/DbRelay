@@ -22,6 +22,7 @@ Pushed to https://github.com/Manish-1kumar/DbRelay (private). Nothing published 
 | M13 Production-readiness audit | COMPLETED | Follow-up audit refuted "no open High" (FU-01); FU-01..FU-10 fixed and re-verified (1,140 test runs, 0 failed); FU-01/FU-04 mutation-checked. No independent re-audit of the FU fixes yet |
 | M14 Release candidate | BLOCKED (owner) | Engineering done; NuGet prefix, contacts, public visibility and trademark check need the owner |
 | Post-RC: batched acknowledgements (ADR 0003) | REVIEWED | Up to ~2.8× throughput under load (`docs/benchmarks.md` §3); BA review: 0 Critical/High, BA-01..BA-12 fixed or accepted; full run 1,280/1,280, 0 skipped (4 TFMs), locally and in CI run 45025481068 |
+| Post-RC: 0.2 engineering backlog | COMPLETED | T-03, K13, CR-21, CR-18 (ADR 0004), multi-row PostgreSQL insert, CR-11/T-05, BA-05, BA-07 (3 SQL Server deadlock cycles found and fixed or documented). Full run 1,392/1,392, 0 skipped; soak PASS on both providers |
 | Post-RC: soak/chaos testing | COMPLETED | `docs/soak/`: PostgreSQL 2 h and SQL Server 1 h, PASS 9/9 each with 0 lost or orphaned messages under worker kills and session kills |
 
 ## Environment

@@ -29,6 +29,14 @@ drops it afterwards (pass `--keep` to keep it).
 | 2026-11-22 | PostgreSQL 17.5 | 2 h | 300,378 | 112 / 53 | 3,175 | 0 | 1 | 859 ms | **PASS 9/9** | [report](2026-11-22-postgresql-120min.md) |
 | 2026-11-22 | SQL Server 2022 Express | 1 h | 141,024 | 49 / 31 | 1,130 | 0 | 6 | 767 ms | **PASS 9/9** | [report](2026-11-22-sqlserver-60min.md) |
 | 2026-11-22 | PostgreSQL 17.5 (BA fixes) | 30 min | 76,624 | 26 / 16 | 778 | 0 | 0 | 808 ms | **PASS 9/9** | [report](2026-11-22-postgresql-30min-fixed.md) |
+| 2026-11-22 | SQL Server 2022 Express (0.2 backlog) | 30 min | 67,544 | 30 / 13 | 514 | 0 | 0 | 861 ms | **PASS 9/9** | [report](2026-11-22-sqlserver-30min-0.2-backlog.md) |
+| 2026-11-22 | PostgreSQL 17.5 (0.2 backlog) | 30 min | 71,522 | 29 / 15 | 831 | 0 | 0 | 1,397 ms | **PASS 9/9** | [report](2026-11-22-postgresql-30min-0.2-backlog.md) |
+
+The "0.2 backlog" runs use the code after these changes:
+- the payload budgets (CR-18);
+- the multi-row PostgreSQL insert;
+- bounded batch leadership (BA-05);
+- the SQL Server deadlock fixes (BA-07).
 
 In every run, the long-lived worker's memory, threads and handles stayed flat. No unexpected errors (event 1011) were logged.
 

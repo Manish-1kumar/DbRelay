@@ -377,3 +377,33 @@ The 2-hour PostgreSQL run used the build from before the BA review fixes; the ot
   - A blocking handler starved the thread pool, and the test settled on a fixed delay.
 - **Fix:** both tests were made deterministic, and both still fail on the corresponding mutation (batching off; abandoned-handler limit removed).
 - **Result:** the unit suite then passed 10 consecutive full runs (4,160/4,160), and CI run 45025481068 is green at 1,280/1,280 with 0 skipped.
+
+### Run after the 0.2 engineering backlog (2026-11-22)
+
+| Project | Per TFM | Total (4 TFMs) | Failed | Skipped |
+|---|---|---|---|---|
+| DbRelay.Tests | 107 | **428** | 0 | 0 |
+| DbRelay.PostgreSql.Tests | 100 | **400** | 0 | 0 |
+| DbRelay.SqlServer.Tests (RCSI off and on) | 122 | **488** | 0 | 0 |
+| DbRelay.IntegrationTests | 19 | **76** | 0 | 0 |
+| **All** | | **1,392** | **0** | **0** |
+
+`dotnet format --verify-no-changes` was clean, and CI run 45051359799 is green.
+
+**New tests:**
+- **T-03:** realistic-table PostgreSQL plan test.
+- **K13:** schema-name sweep.
+- **CR-21 / CR-18:** paging and payload-budget conformance; enqueue cap.
+- **Multi-row insert:** every field of every row.
+- **CR-11 / T-05:** null-transaction behaviour on both providers.
+- **BA-05:** load test and deterministic hand-off test.
+- **BA-07:** SQL Server stress test.
+
+**Mutation checks** (fix reverted temporarily, new test confirmed failing, fix restored):
+- **Confirmed:** CR-03 statistics, payload budget on both providers, multi-row field mapping, BA-05 promotion.
+- **Inconclusive:** the BA-07 deadlock fixes, because reproduction depends on machine load (see the resolution log in CODE_REVIEW_REPORT.md).
+
+**Soak (final code, 30 min per provider):**
+- **Result:** both passed all 9 invariants.
+- **Messages:** 139,066 committed, with 0 lost and 0 duplicates.
+- **Chaos:** 59 hard kills and 1,345 terminated sessions.
