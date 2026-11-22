@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Data.Common;
 using System.Text;
 using System.Xml.Linq;
@@ -479,6 +480,143 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture) : IAsyncLif
     }
 
     // ---- Helpers -----------------------------------------------------------------------------------------------------
+
+    // ---- Lock behaviour under concurrency (BA-07) -------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Concurrent_claims_batches_stale_acknowledgements_and_cleanup_never_deadlock(bool rcsi)
+    {
+        // BA-07: a batch item whose token is stale still requests a U lock on its row, so batches can wait on each other and on
+        // claims. The review found no cycle by reasoning; this stress test looks for one. The provider retries deadlock victims
+        // silently (error 1205), so the test asserts the store's own count of deadlock retries.
+        RequireDatabase(rcsi);
+        var (services, schema) = await CreateAsync(rcsi);
+        var store = services.GetRequiredService<IOutboxStore>();
+        var batchStore = (IOutboxBatchStore)store;
+
+
+        const int MessageCount = 600;
+        var ids = new List<Guid>();
+        for (var chunk = 0; chunk < MessageCount / 200; chunk++)
+        {
+            var records = Enumerable.Range(0, 200).Select(i => Record(Guid.NewGuid(), $"s{chunk}-{i}")).ToList();
+            await store.InsertStandaloneAsync(records, Ct);
+            ids.AddRange(records.Select(r => r.Id));
+        }
+
+        var delivered = new ConcurrentDictionary<Guid, int>();
+        var errors = new ConcurrentQueue<Exception>();
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        stop.CancelAfter(TimeSpan.FromSeconds(120));
+        var done = 0;
+
+        async Task WorkerAsync(int seed)
+        {
+            var random = new Random(seed);
+            while (Volatile.Read(ref done) == 0 && !stop.IsCancellationRequested)
+            {
+                try
+                {
+                    var token = Guid.NewGuid();
+                    var claimed = await store.ClaimAsync(new ClaimRequest(random.Next(5, 40), TimeSpan.FromMilliseconds(800), token, $"w{seed}"), stop.Token);
+                    if (claimed.Count == 0)
+                    {
+                        await Task.Delay(20, stop.Token);
+                        continue;
+                    }
+
+                    // About a third of the batches outlive their 800 ms lease, so other workers reclaim them and these tokens go stale.
+                    await Task.Delay(random.Next(0, 1200), stop.Token);
+                    var items = claimed.Select(m => new OutboxAcknowledgement(m.Id, token)).OrderBy(_ => random.Next()).ToList();
+                    if (random.Next(4) == 0)
+                    {
+                        // The same message twice in one call, with a stale token: a dispatcher can hold both a stale and a current
+                        // acknowledgement for one message.
+                        items.Insert(random.Next(items.Count + 1), new OutboxAcknowledgement(items[random.Next(items.Count)].MessageId, Guid.NewGuid()));
+                    }
+                    var action = random.Next(100);
+                    if (action < 70)
+                    {
+                        foreach (var pair in await batchStore.MarkDeliveredBatchAsync(items, stop.Token))
+                        {
+                            delivered.AddOrUpdate(pair.MessageId, 1, (_, n) => n + 1);
+                        }
+                    }
+                    else if (action < 85)
+                    {
+                        await batchStore.ReleaseBatchAsync(items, stop.Token);
+                    }
+                    else if (action < 95)
+                    {
+                        if (await store.MarkDeliveredAsync(items[0].MessageId, token, stop.Token))
+                        {
+                            delivered.AddOrUpdate(items[0].MessageId, 1, (_, n) => n + 1);
+                        }
+
+                        foreach (var pair in await batchStore.MarkDeliveredBatchAsync(items.Skip(1).ToList() is { Count: > 0 } rest ? rest : items, stop.Token))
+                        {
+                            delivered.AddOrUpdate(pair.MessageId, 1, (_, n) => n + 1);
+                        }
+                    }
+                    else
+                    {
+                        foreach (var item in items)
+                        {
+                            await store.ScheduleRetryAsync(item.MessageId, token, TimeSpan.Zero, "stress retry", stop.Token);
+                        }
+                    }
+                }
+                catch (OperationCanceledException) when (stop.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    errors.Enqueue(ex);
+                }
+            }
+        }
+
+        async Task CleanupAsync()
+        {
+            while (Volatile.Read(ref done) == 0 && !stop.IsCancellationRequested)
+            {
+                try
+                {
+                    await store.DeleteDeliveredAsync(TimeSpan.Zero, 50, stop.Token);
+                    var stats = await store.GetStatisticsAsync(stop.Token);
+                    if (stats.Pending + stats.Processing == 0)
+                    {
+                        Volatile.Write(ref done, 1);
+                    }
+
+                    await Task.Delay(150, stop.Token);
+                }
+                catch (OperationCanceledException) when (stop.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    errors.Enqueue(ex);
+                }
+            }
+        }
+
+        await Task.WhenAll(Enumerable.Range(0, 8).Select(WorkerAsync).Append(CleanupAsync()));
+
+        Assert.Empty(errors);
+        Assert.Equal(1, Volatile.Read(ref done)); // finished, not timed out
+        Assert.Equal(ids.Order(), delivered.Keys.Order()); // every message delivered exactly once by token-guarded updates
+        Assert.All(delivered.Values, count => Assert.Equal(1, count));
+
+        // Every participant in this test is this store, so every deadlock has a victim here, and the store counts its retries.
+        var retries = ((SqlServerOutboxStore)store).DeadlockRetries;
+        TestContext.Current.TestOutputHelper?.WriteLine($"deadlock retries: {retries}");
+        Assert.Equal(0, retries);
+    }
 
     private void RequireDatabase(bool rcsi) => Assert.SkipWhen(fixture.GetSkipReason(rcsi) is not null, fixture.GetSkipReason(rcsi) ?? string.Empty);
 

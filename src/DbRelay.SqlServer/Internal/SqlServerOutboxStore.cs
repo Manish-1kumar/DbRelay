@@ -15,6 +15,9 @@ internal sealed class SqlServerOutboxStore : IOutboxStore, IOutboxBatchStore
     private readonly SqlServerConnectionSource _connections;
     private readonly SqlServerOutboxSql _sql;
 
+    /// <summary>Deadlock victims retried by this store (see <see cref="SqlServerConnectionSource.ExecuteAsync{T}"/>).</summary>
+    internal long DeadlockRetries => _connections.DeadlockRetries;
+
     public SqlServerOutboxStore(SqlServerConnectionSource connections, SqlServerOutboxSql sql)
     {
         _connections = connections;

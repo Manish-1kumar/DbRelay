@@ -12,6 +12,7 @@ internal sealed class SqlServerConnectionSource
     private const int MaxDeadlockAttempts = 3;
 
     private readonly Func<SqlConnection> _factory;
+    private long _deadlockRetries;
 
     public SqlServerConnectionSource(Func<SqlConnection> factory, int commandTimeoutSeconds)
     {
@@ -20,6 +21,9 @@ internal sealed class SqlServerConnectionSource
     }
 
     public int CommandTimeoutSeconds { get; }
+
+    /// <summary>How many times an operation was chosen as a deadlock victim and retried (diagnostics and tests).</summary>
+    internal long DeadlockRetries => Interlocked.Read(ref _deadlockRetries);
 
     public async Task<SqlConnection> OpenAsync(CancellationToken cancellationToken)
     {
@@ -77,6 +81,7 @@ internal sealed class SqlServerConnectionSource
                 catch (SqlException ex) when (ex.Number == DeadlockVictimErrorNumber && attempt < MaxDeadlockAttempts)
                 {
                     // Fall through to retry after a short, randomized pause.
+                    Interlocked.Increment(ref _deadlockRetries);
                 }
             }
 
