@@ -12,10 +12,11 @@ DbRelay is pre-1.0. Security fixes are made on the latest `0.x` release only.
 
 **Please do not report security vulnerabilities in public issues, discussions or pull requests.**
 
-Use GitHub's private vulnerability reporting: open the repository's **Security** tab and choose **Report a vulnerability**.
-This keeps the report private between you and the maintainers until a fix is released.
+Use GitHub's private vulnerability reporting: open the repository's **Security** tab and choose **Report a vulnerability**,
+or go directly to <https://github.com/Manish-1kumar/DbRelay/security/advisories/new>. This keeps the report private between
+you and the maintainers until a fix is released.
 
-<!-- TODO(maintainer): enable private vulnerability reporting in the repository settings (Settings > Code security) before the first public release. -->
+<!-- TODO(maintainer): private vulnerability reporting can only be enabled once the repository is public (Settings > Code security). Enable it at the same time as making the repository public. -->
 <!-- TODO(maintainer): add a fallback security contact for reporters who cannot use GitHub. -->
 
 Please include:
@@ -31,8 +32,9 @@ the release notes unless they prefer not to be.
 
 These areas are especially relevant to DbRelay's threat model:
 
-- **SQL injection.** Every value is a parameter. Schema and table names come only from configuration, are validated against
-  `^[A-Za-z_][A-Za-z0-9_]{0,62}$` and are always quoted.
+- **SQL injection.** Every value is a parameter. Schema and table names come only from configuration. They must consist
+  solely of an ASCII letter or underscore followed by up to 62 ASCII letters, digits or underscores; whitespace and control
+  characters, including a trailing newline, are rejected. They are always quoted.
 - **Type activation.** DbRelay never creates a CLR type from a name stored in the database. Handlers name the target type
   explicitly when they deserialize.
 - **Secrets in logs.** DbRelay never logs payloads or connection strings. A malformed PostgreSQL connection string is rejected

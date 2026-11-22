@@ -15,9 +15,10 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>outbox;transactional-outbox;dapper;ado.net;postgresql;sqlserver;messaging;reliability</PackageTags>
-    <!-- Repository URL is supplied at release time (-p:DbRelayRepositoryUrl=...); see RELEASE_CHECKLIST.md. -->
-    <PackageProjectUrl Condition="'$(DbRelayRepositoryUrl)' != ''">$(DbRelayRepositoryUrl)</PackageProjectUrl>
-    <RepositoryUrl Condition="'$(DbRelayRepositoryUrl)' != ''">$(DbRelayRepositoryUrl)</RepositoryUrl>
+    <!-- Override with -p:DbRelayRepositoryUrl=... if the repository moves (for example to an organisation). -->
+    <DbRelayRepositoryUrl Condition="'$(DbRelayRepositoryUrl)' == ''">https://github.com/Manish-1kumar/DbRelay</DbRelayRepositoryUrl>
+    <PackageProjectUrl>$(DbRelayRepositoryUrl)</PackageProjectUrl>
+    <RepositoryUrl>$(DbRelayRepositoryUrl)</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
@@ -26,7 +27,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="$(MSBuildThisFileDirectory)../README.md" Pack="true" PackagePath="\" Visible="false" />
+    <!-- A package-specific README: nuget.org cannot resolve the repository README's relative links. -->
+    <None Include="$(MSBuildThisFileDirectory)PACKAGE_README.md" Pack="true" PackagePath="\README.md" Visible="false" />
   </ItemGroup>
 
 </Project>
