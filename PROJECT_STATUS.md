@@ -3,7 +3,7 @@
 _Last updated: 2026-11-22_
 
 **Phase:** Milestone 14, release candidate ready **pending owner actions** (see RELEASE_CHECKLIST.md).
-Pushed to https://github.com/Manish-1kumar/DbRelay (private). Nothing published to NuGet.
+Public at https://github.com/Manish-1kumar/DbRelay (since 2026-11-22; private vulnerability reporting enabled). Nothing published to NuGet.
 
 | Milestone | Status | Notes |
 |---|---|---|

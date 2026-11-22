@@ -41,9 +41,10 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 | Reserve the `DbRelay.*` ID prefix on nuget.org | 🔒 |
 | Manual trademark search (USPTO/EUIPO/WIPO, classes 9/42) for "DbRelay" (K5) | 🔒 |
 | Contacts in CODE_OF_CONDUCT.md and SECURITY.md: GitHub private reporting only, no email (owner decision, 2026-11-22) | ✅ |
-| Enable GitHub private vulnerability reporting (possible only once the repository is public; both contacts depend on it) | 🔒 |
+| Enable GitHub private vulnerability reporting | ✅ (2026-11-22) |
 | Package-specific README with absolute links (`src/PACKAGE_README.md`, packed as README.md; 0 relative links verified) | ✅ |
-| Make the repository public (and enable private vulnerability reporting), tag `v0.1.0`, `dotnet pack -c Release -p:ContinuousIntegrationBuild=true`, publish | 🔒 |
+| Make the repository public | ✅ (2026-11-22). Re-created from a history rewritten to the GitHub no-reply address; the original private repository is kept as `DbRelay-archive` |
+| Tag `v0.1.0`, `dotnet pack -c Release -p:ContinuousIntegrationBuild=true`, publish to NuGet | 🔒 |
 | Create the GitHub release with CHANGELOG notes | 🔒 |
 
 ## Engineering items carried to 0.2
