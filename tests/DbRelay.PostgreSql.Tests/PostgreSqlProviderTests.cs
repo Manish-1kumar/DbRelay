@@ -377,7 +377,7 @@ public sealed class PostgreSqlProviderTests(PostgreSqlFixture fixture)
                 ["requeue-dead-lettered"] = await ExplainAsync(settings.RequeueDeadLetteredSql, disableSeqScan: false, 100),
                 ["statistics"] = await ExplainAsync(settings.StatisticsSql, disableSeqScan: false),
                 ["admin-query-dead-lettered"] = await ExplainAsync(
-                    settings.QuerySqlPrefix + " WHERE status = $1 ORDER BY created_at, id OFFSET $2 LIMIT $3",
+                    settings.QueryPage(settings.QueryKeysPrefix + " WHERE status = $1 ORDER BY created_at, id OFFSET $2 LIMIT $3"),
                     disableSeqScan: false,
                     (short)OutboxMessageStatus.DeadLettered,
                     0,

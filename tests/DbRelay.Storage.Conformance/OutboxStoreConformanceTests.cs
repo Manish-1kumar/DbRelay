@@ -912,6 +912,18 @@ public abstract class OutboxStoreConformanceTests : IAsyncLifetime
         Assert.Empty(future);
         var past = await Admin.QueryAsync(new OutboxQuery { CreatedBefore = DateTimeOffset.UtcNow.AddHours(1), Take = 1000 }, Ct);
         Assert.Equal(6, past.Count);
+
+        // Pages are consecutive slices of one stable order (oldest first), with full rows.
+        var all = await Admin.QueryAsync(new OutboxQuery { Take = 1000 }, Ct);
+        Assert.Equal(all.Select(m => m.CreatedAt).Order(), all.Select(m => m.CreatedAt));
+        var page3 = await Admin.QueryAsync(new OutboxQuery { Skip = 4, Take = 2 }, Ct);
+        Assert.Equal(all.Select(m => m.Id), page1.Concat(page2).Concat(page3).Select(m => m.Id));
+        Assert.All(all, m => Assert.False(m.Payload.IsEmpty));
+
+        // CR-21: offsets are bounded.
+        Assert.Empty(await Admin.QueryAsync(new OutboxQuery { Skip = 10_000 }, Ct));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => Admin.QueryAsync(new OutboxQuery { Skip = 10_001 }, Ct));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => Admin.QueryAsync(new OutboxQuery { Skip = -1 }, Ct));
     }
 
     [Fact]

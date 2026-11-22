@@ -35,6 +35,14 @@ IReadOnlyList<OutboxMessageDetails> deadLetters = await admin.QueryAsync(
     new OutboxQuery { Status = OutboxMessageStatus.DeadLettered, MessageType = "orders.created", Take = 50 }, ct);
 ```
 
+`QueryAsync` returns messages oldest first, in pages of up to 1,000, with `Skip` limited to 10,000.
+
+- **Indexed filters:** filtering by `Status` = Pending, Processing or DeadLettered uses the partial indexes and stays cheap.
+- **Unindexed queries:** the creation-time order has no index of its own, so an unfiltered query, or one for Delivered
+  messages, reads every matching row. That costs about 0.5 s per million rows on a laptop; the sort itself stays in memory.
+  Such an index was measured to make every insert 25–28% more expensive, so DbRelay leaves it out.
+- **Narrowing down:** use `MessageType` or a `CreatedAfter`/`CreatedBefore` range rather than paging deep.
+
 `samples/PostgreSql.Sample` exposes these as `GET /outbox/stats` and `GET /outbox/messages/{id}`. Do not expose
 `IOutboxAdmin` publicly without authorization: `OutboxMessageDetails` includes the payload.
 

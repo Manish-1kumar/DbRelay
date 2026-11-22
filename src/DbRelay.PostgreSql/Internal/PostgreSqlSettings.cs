@@ -12,6 +12,8 @@ internal sealed class PostgreSqlSettings
     internal const string ScriptResourceName = "DbRelay.PostgreSql.Scripts.001_create_outbox.sql";
     private const int MaxIdentifierLength = 63;
     private const string ReservedTableName = "schema_version";
+    private readonly string _queryPageHead;
+    private readonly string _queryPageTail;
 
     /// <summary>Columns read into <see cref="OutboxMessageDetails"/>, in ordinal order (see <c>PostgreSqlOutboxStore.ReadDetails</c>).</summary>
     private static readonly string[] DetailColumns =
@@ -122,7 +124,13 @@ internal sealed class PostgreSqlSettings
 
         GetSql = $"SELECT {columns} FROM {table} WHERE id = $1";
 
-        QuerySqlPrefix = $"SELECT {columns} FROM {table}";
+        // Admin paging (CR-21) sorts only the narrow keys, then fetches the page's full rows by primary key, as the SQL Server
+        // provider does. Sorting whole rows spilled about 400 MB to disk for Skip = 10,000 on a 1M-row table (1.6 s); the key
+        // sort stays an in-memory top-N heap (about 2 MB, 0.5 s). There is deliberately no created_at index: it measured 25-28%
+        // more insert cost, which every enqueue would pay for the benefit of an admin screen.
+        QueryKeysPrefix = $"SELECT id, created_at FROM {table}";
+        _queryPageHead = $"SELECT {claimedColumns} FROM (";
+        _queryPageTail = $") AS k JOIN {table} AS m ON m.id = k.id ORDER BY k.created_at, k.id";
 
         // One scalar subquery per status. Each predicate matches a partial index (claim: status IN (0,1); cleanup: status = 2;
         // dead: status = 3), so the planner never needs a full heap scan. Previously a single count(*) FILTER over the
@@ -187,9 +195,13 @@ internal sealed class PostgreSqlSettings
 
     public string GetSql { get; }
 
-    public string QuerySqlPrefix { get; }
+    /// <summary>The start of the admin key query; filters, <c>ORDER BY created_at, id</c>, <c>OFFSET</c> and <c>LIMIT</c> follow.</summary>
+    public string QueryKeysPrefix { get; }
 
     public string StatisticsSql { get; }
+
+    /// <summary>Wraps a complete admin key query (see <see cref="QueryKeysPrefix"/>) so that it returns the page's full rows.</summary>
+    public string QueryPage(string keysSql) => _queryPageHead + keysSql + _queryPageTail;
 
     public string RequeueSql { get; }
 

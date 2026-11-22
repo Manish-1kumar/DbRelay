@@ -76,7 +76,11 @@ public sealed class OutboxQuery
     /// <summary>Only messages created before this time.</summary>
     public DateTimeOffset? CreatedBefore { get; init; }
 
-    /// <summary>The number of matching messages to skip.</summary>
+    /// <summary>
+    /// The number of matching messages to skip (0 to 10,000). Results are ordered by creation time, which has no dedicated index,
+    /// so a page costs a scan of the matching rows. Filter by <see cref="Status"/> (Pending, Processing or DeadLettered use
+    /// partial indexes), <see cref="MessageType"/> or a creation-time range rather than paging deep into a large table.
+    /// </summary>
     public int Skip { get; init; }
 
     /// <summary>The maximum number of messages to return (1 to 1000). Defaults to 100.</summary>

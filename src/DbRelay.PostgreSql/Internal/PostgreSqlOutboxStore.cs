@@ -120,7 +120,7 @@ internal sealed class PostgreSqlOutboxStore : IOutboxStore, IOutboxBatchStore
         var command = CreateCommand(string.Empty);
         await using (command.ConfigureAwait(false))
         {
-            var sql = new StringBuilder(_settings.QuerySqlPrefix);
+            var sql = new StringBuilder(_settings.QueryKeysPrefix);
             var separator = " WHERE ";
 
             void AddFilter(string condition, NpgsqlParameter parameter)
@@ -156,7 +156,7 @@ internal sealed class PostgreSqlOutboxStore : IOutboxStore, IOutboxBatchStore
             sql.Append(" LIMIT $").Append(command.Parameters.Count);
 
             // Only fixed SQL fragments and the validated, quoted table name are concatenated; all values are parameters.
-            command.CommandText = sql.ToString();
+            command.CommandText = _settings.QueryPage(sql.ToString());
             return await ReadDetailsListAsync(command, query.Take, cancellationToken).ConfigureAwait(false);
         }
     }

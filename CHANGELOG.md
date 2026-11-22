@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - `DbRelay.PostgreSql` now depends on Npgsql 10.0.4 (was 10.0.3).
+- **`OutboxQuery.Skip` is limited to 10,000** (CR-21); larger values throw `ArgumentOutOfRangeException`. Narrow the query
+  with filters instead of paging deeper.
+- PostgreSQL admin queries sort only `(created_at, id)` and then fetch the page's rows, as the SQL Server provider does. On a
+  1M-row table, a page at `Skip = 10,000` went from 1.6 s with about 400 MB spilled to disk to 0.5 s in memory.
 
 ### Fixed
 

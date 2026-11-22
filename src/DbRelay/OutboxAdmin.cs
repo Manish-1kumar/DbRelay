@@ -5,6 +5,8 @@ namespace DbRelay;
 /// <summary>Validates operator requests and delegates them to the storage provider.</summary>
 internal sealed class OutboxAdmin : IOutboxAdmin
 {
+    internal const int MaxSkip = 10_000;
+
     private readonly IOutboxStore _store;
 
     public OutboxAdmin(IOutboxStore store)
@@ -18,7 +20,12 @@ internal sealed class OutboxAdmin : IOutboxAdmin
     public Task<IReadOnlyList<OutboxMessageDetails>> QueryAsync(OutboxQuery query, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(query);
-        ArgumentOutOfRangeException.ThrowIfNegative(query.Skip, nameof(query));
+        if (query.Skip is < 0 or > MaxSkip)
+        {
+            // CR-21: paging sorts every matching row's (created_at, id); a bounded offset keeps that sort in memory.
+            throw new ArgumentOutOfRangeException(nameof(query), query.Skip, $"OutboxQuery.Skip must be between 0 and {MaxSkip}. Narrow the query with Status, MessageType or a CreatedAfter/CreatedBefore range instead of paging deeper.");
+        }
+
         if (query.Take is < 1 or > 1000)
         {
             throw new ArgumentOutOfRangeException(nameof(query), query.Take, "OutboxQuery.Take must be between 1 and 1000.");

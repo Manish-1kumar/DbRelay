@@ -56,7 +56,7 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 - **Single-statement multi-row insert on PostgreSQL.** Measured opportunity.
 - **Uniform `transaction: null` semantics (CR-11).**
 - **Aggregate enqueue size limits (CR-18).**
-- **`created_at` index for admin queries (CR-21).**
+- ~~**`created_at` index for admin queries (CR-21).**~~ Resolved without an index (it measured +25-28% insert cost). PostgreSQL admin paging now sorts only the narrow keys, as SQL Server does, and `Skip` is capped at 10,000. See `docs/troubleshooting.md`.
 - ~~**Automated PostgreSQL large-table plan assertion (T-03).**~~ Done: `Planner_chooses_the_partial_indexes_on_a_realistic_table` (100k rows, no `enable_seqscan` override; mutation-checked against the pre-CR-03 statistics query).
 - ~~**Test fixtures that sweep orphaned `t_*` schemas left by killed test processes.**~~ Done (K13).
 - **SQL Server package release; Azure SQL and SQL Server 2019 testing.**
