@@ -351,6 +351,224 @@ public sealed class DispatcherTests
     }
 
     [Fact]
+    public async Task Delivered_acknowledgements_are_batched_under_concurrent_load()
+    {
+        // ADR 0003: acknowledgements that arrive while a round trip is in flight share the next one.
+        var store = new InMemoryOutboxStore();
+        for (var i = 0; i < 300; i++)
+        {
+            store.Add($"m{i}");
+        }
+
+        using var host = CreateHost(store, async (_, ct) =>
+        {
+            await Task.Delay(5, ct);
+            return DeliveryResult.Delivered();
+        }, d =>
+        {
+            d.MaxConcurrency = 32;
+            d.BatchSize = 300;
+        });
+
+        await host.StartAsync(Ct);
+        await WaitUntilAsync(() => store.CountByStatus().GetValueOrDefault(OutboxMessageStatus.Delivered) == 300);
+        await host.StopAsync(Ct);
+
+        // Batches of one take the cheaper single-row statement (fast path), so only multi-item batches appear here.
+        var sizes = store.DeliveredBatchSizes.ToArray();
+        Assert.NotEmpty(sizes);
+        Assert.All(sizes, size => Assert.True(size > 1));
+        Assert.InRange(sizes.Sum(), 2, 300);
+        Assert.True(sizes.Max() > 1, $"expected some batching; batch sizes were {string.Join(",", sizes)}");
+    }
+
+    [Fact]
+    public async Task Acknowledgement_batcher_completes_every_waiter_under_heavy_contention_smoke()
+    {
+        // Smoke test only (BA-11): heavy contention with every waiter required to finish. It does NOT reliably catch the lost-wake-up
+        // race (the window is too narrow); A_follower_that_enqueues_just_before_the_leader_releases_is_not_stranded is the regression test.
+        var store = new InMemoryOutboxStore();
+        var ids = Enumerable.Range(0, 4000).Select(i => store.Add($"m{i}")).ToList();
+        var token = Guid.NewGuid();
+        var claimed = await store.ClaimAsync(new DbRelay.Storage.ClaimRequest(1000, TimeSpan.FromMinutes(5), token, "w"), Ct);
+        claimed = [.. claimed, .. await store.ClaimAsync(new DbRelay.Storage.ClaimRequest(1000, TimeSpan.FromMinutes(5), token, "w"), Ct)];
+        claimed = [.. claimed, .. await store.ClaimAsync(new DbRelay.Storage.ClaimRequest(1000, TimeSpan.FromMinutes(5), token, "w"), Ct)];
+        claimed = [.. claimed, .. await store.ClaimAsync(new DbRelay.Storage.ClaimRequest(1000, TimeSpan.FromMinutes(5), token, "w"), Ct)];
+        Assert.Equal(4000, claimed.Count);
+
+        foreach (var maxConcurrency in new[] { 1, 8, 32 })
+        {
+            using var batcher = new DbRelay.Dispatching.AcknowledgementBatcher(
+                store, store, maxConcurrency, (_, _) => Task.FromResult(false),
+                new DbRelayDiagnosticsHolder().Metrics, TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+            var slice = claimed.Skip(maxConcurrency switch { 1 => 0, 8 => 1000, _ => 2000 }).Take(1000).ToList();
+            var results = await Task.WhenAll(slice.Select(m => Task.Run(() => batcher.MarkDeliveredAsync(m, token), Ct)))
+                .WaitAsync(TimeSpan.FromSeconds(30), Ct); // a stranded waiter would hang here
+            Assert.All(results, r => Assert.True(r));
+            await batcher.CompleteAsync();
+        }
+    }
+
+    [Fact]
+    public async Task A_follower_that_enqueues_just_before_the_leader_releases_is_not_stranded()
+    {
+        // Deterministic version of the lost-wake-up race. The leader has drained (its own item is done) and is about to release;
+        // a follower enqueues in exactly that window. The leader must re-check the queue and flush the follower.
+        var store = new InMemoryOutboxStore();
+        store.Add("leader");
+        store.Add("follower");
+        var token = Guid.NewGuid();
+        var claimed = await store.ClaimAsync(new DbRelay.Storage.ClaimRequest(10, TimeSpan.FromMinutes(5), token, "w"), Ct);
+        using var batcher = new DbRelay.Dispatching.AcknowledgementBatcher(
+            store, store, maxConcurrency: 1, (_, _) => Task.FromResult(false),
+            new DbRelayDiagnosticsHolder().Metrics, TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        Task<bool?>? follower = null;
+        batcher.BeforeLeaderReleaseForTesting = async () =>
+        {
+            batcher.BeforeLeaderReleaseForTesting = null; // only the first release
+            follower = Task.Run(() => batcher.MarkDeliveredAsync(claimed[1], token), Ct);
+            await WaitUntilAsync(() => batcher.QueuedCount == 1); // enqueued, and its Wait(0) failed because we still lead
+            await Task.Delay(50, Ct);
+        };
+
+        Assert.True(await batcher.MarkDeliveredAsync(claimed[0], token));
+        Assert.NotNull(follower);
+        Assert.True(await follower.WaitAsync(TimeSpan.FromSeconds(5), Ct)); // stranded forever before the fix
+    }
+
+    [Fact]
+    public async Task A_throwing_logger_and_a_failing_store_never_strand_waiters()
+    {
+        // BA-01: every log call throws and every store call fails; all waiters must still complete (with null) and none may hang.
+        var store = new InMemoryOutboxStore { UpdateFailure = _ => new TimeoutException("db down") };
+        for (var i = 0; i < 12; i++)
+        {
+            store.Add($"m{i}");
+        }
+
+        var token = Guid.NewGuid();
+        var claimed = await store.ClaimAsync(new DbRelay.Storage.ClaimRequest(100, TimeSpan.FromMinutes(5), token, "w"), Ct);
+        using var batcher = new DbRelay.Dispatching.AcknowledgementBatcher(
+            store, store, maxConcurrency: 8, (_, _) => Task.FromResult(false),
+            new DbRelayDiagnosticsHolder().Metrics, TimeProvider.System, new ThrowingLogger());
+
+        var results = await Task.WhenAll(claimed.Select(m => Task.Run(() => batcher.MarkDeliveredAsync(m, token), Ct)))
+            .WaitAsync(TimeSpan.FromSeconds(30), Ct);
+
+        Assert.All(results, r => Assert.Null(r));
+        Assert.Equal(0, batcher.QueuedCount);
+    }
+
+    [Fact]
+    public async Task A_multi_item_batch_that_committed_but_reported_failure_is_recovered_by_re_reading()
+    {
+        // BA-12: hold the leader's first (single-row) flush so two followers form a real 2-item batch, then make that batch's first
+        // row commit and throw. The retry must not report the committed row as lost.
+        var store = new InMemoryOutboxStore();
+        for (var i = 0; i < 3; i++)
+        {
+            store.Add($"m{i}");
+        }
+
+        var token = Guid.NewGuid();
+        var claimed = await store.ClaimAsync(new DbRelay.Storage.ClaimRequest(10, TimeSpan.FromMinutes(5), token, "w"), Ct);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.BeforeSingleDelivered = async () =>
+        {
+            store.BeforeSingleDelivered = null; // only the leader's first flush
+            entered.TrySetResult();
+            await gate.Task;
+        };
+
+        using var batcher = new DbRelay.Dispatching.AcknowledgementBatcher(
+            store, store, maxConcurrency: 1,
+            (d, _) => Task.FromResult(store.Get(d.Id).Status == OutboxMessageStatus.Delivered), // the real check re-reads the row
+            new DbRelayDiagnosticsHolder().Metrics, TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        var leader = Task.Run(() => batcher.MarkDeliveredAsync(claimed[0], token), Ct);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+        var followers = new[] { claimed[1], claimed[2] }.Select(m => Task.Run(() => batcher.MarkDeliveredAsync(m, token), Ct)).ToList();
+        await WaitUntilAsync(() => batcher.QueuedCount == 2);
+        store.CommitThenFailOnce = true; // the 2-item batch's first row commits, then the call "fails"
+        gate.SetResult();
+
+        var results = await Task.WhenAll([leader, .. followers]).WaitAsync(TimeSpan.FromSeconds(30), Ct);
+
+        Assert.All(results, r => Assert.True(r));
+        Assert.Contains(2, store.DeliveredBatchSizes); // it really was a multi-item batch
+        Assert.All(claimed, m => Assert.Equal(OutboxMessageStatus.Delivered, store.Get(m.Id).Status));
+    }
+
+    [Fact]
+    public async Task Shutdown_falls_back_to_per_message_release_when_the_batched_release_fails()
+    {
+        // BA-12: if ReleaseBatchAsync throws, unstarted claims must still be released one by one.
+        var store = new InMemoryOutboxStore { FailBatchRelease = true };
+        for (var i = 0; i < 5; i++)
+        {
+            store.Add($"m{i}");
+        }
+
+        var started = new TaskCompletionSource();
+        var finish = new TaskCompletionSource();
+        using var host = CreateHost(store, async (_, _) =>
+        {
+            started.TrySetResult();
+            await finish.Task;
+            return DeliveryResult.Delivered();
+        }, d => d.MaxConcurrency = 1);
+
+        await host.StartAsync(Ct);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+        var stopping = host.StopAsync(Ct);
+        await Task.Delay(200, Ct);
+        finish.SetResult();
+        await stopping;
+
+        Assert.True(store.BatchReleaseCalls >= 1);
+        var statuses = store.CountByStatus();
+        Assert.Equal(1, statuses.GetValueOrDefault(OutboxMessageStatus.Delivered));
+        Assert.Equal(4, statuses.GetValueOrDefault(OutboxMessageStatus.Pending));
+        Assert.Equal(0, statuses.GetValueOrDefault(OutboxMessageStatus.Processing));
+    }
+
+    private sealed class ThrowingLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            throw new InvalidOperationException("logging provider failure");
+    }
+
+    private sealed class DbRelayDiagnosticsHolder
+    {
+        public DbRelayMetrics Metrics { get; } = new(new DbRelay.Dispatching.DispatcherState());
+    }
+
+    [Fact]
+    public async Task Acknowledgements_are_written_one_by_one_when_batching_is_disabled()
+    {
+        var store = new InMemoryOutboxStore();
+        for (var i = 0; i < 20; i++)
+        {
+            store.Add($"m{i}");
+        }
+
+        using var host = CreateHost(store, (_, _) => Task.FromResult(DeliveryResult.Delivered()), d => d.BatchAcknowledgements = false);
+        await host.StartAsync(Ct);
+        await WaitUntilAsync(() => store.CountByStatus().GetValueOrDefault(OutboxMessageStatus.Delivered) == 20);
+        await host.StopAsync(Ct);
+
+        Assert.Empty(store.DeliveredBatchSizes);
+    }
+
+    [Fact]
     public async Task Crash_looping_messages_are_dead_lettered_without_delivery()
     {
         var store = new InMemoryOutboxStore();

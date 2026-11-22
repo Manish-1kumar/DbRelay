@@ -120,6 +120,11 @@ processes, and retries all reorder messages.
 | Abandoned handlers are bounded: delivery pauses and health reports Degraded while too many are still running | Unit `DispatcherTests.Claiming_pauses_while_abandoned_handlers_fill_every_slot` |
 | A real dispatcher whose lease was taken over cannot overwrite the new owner (event 1007) | Integration `StaleWorkerTests.Real_dispatcher_whose_lease_was_taken_over_cannot_overwrite_the_new_owner` |
 | Shutdown is prompt even when the database blocks the claim | Integration `GracefulShutdownTests.Shutdown_is_prompt_even_when_the_claim_is_blocked_by_the_database` (mutation-checked) |
+| Batched acknowledgements keep every row guarded by its own lock token: a stale or swapped token changes nothing, a repeated acknowledgement changes nothing | Conformance `Batch_mark_delivered_updates_only_rows_that_still_hold_their_token`, `Batch_acknowledgements_check_each_rows_own_token` (PostgreSQL and SQL Server, RCSI off and on) |
+| Batched shutdown release gives the attempt back only for messages that still hold the token | Conformance `Batch_release_returns_messages_without_counting_the_attempt` |
+| A full 1,000-item batch works (SQL Server chunking and padding included) | Conformance `Batch_acknowledgements_handle_a_full_batch` |
+| Acknowledgement batching never strands a waiter (lost-wake-up race), and actually batches under load | Unit `DispatcherTests.A_follower_that_enqueues_just_before_the_leader_releases_is_not_stranded` (deterministic; mutation-checked), `Acknowledgement_batcher_completes_every_waiter_under_heavy_contention_smoke`, `Delivered_acknowledgements_are_batched_under_concurrent_load` |
+| The abandoned-handler count can never be left stale by a race | Unit `AbandonedHandlerCounterTests.Concurrent_start_and_finish_never_leaves_a_stale_count` |
 | Messages without enough lease left to finish are released instead of delivered | Unit `DispatcherTests.Messages_with_too_little_lease_left_are_released_instead_of_delivered` |
 
 ### Database outages

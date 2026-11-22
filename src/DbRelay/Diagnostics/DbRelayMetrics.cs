@@ -23,6 +23,7 @@ internal sealed class DbRelayMetrics : IDisposable
     private readonly Histogram<double> _deliveryDuration;
     private readonly Histogram<double> _claimDuration;
     private readonly Histogram<int> _claimBatchSize;
+    private readonly Histogram<int> _ackBatchSize;
     private volatile OutboxStatistics? _statistics;
 
     public DbRelayMetrics(Dispatching.DispatcherState dispatcherState)
@@ -40,6 +41,7 @@ internal sealed class DbRelayMetrics : IDisposable
         _deliveryDuration = _meter.CreateHistogram<double>("dbrelay.delivery.duration", "s", "Duration of delivery handler invocations.");
         _claimDuration = _meter.CreateHistogram<double>("dbrelay.claim.duration", "s", "Duration of claim queries.");
         _claimBatchSize = _meter.CreateHistogram<int>("dbrelay.claim.batch_size", "{message}", "Number of messages returned per claim.");
+        _ackBatchSize = _meter.CreateHistogram<int>("dbrelay.ack.batch_size", "{message}", "Number of delivered acknowledgements written per round trip (ADR 0003).");
 
         _meter.CreateObservableGauge("dbrelay.messages.pending", () => Observe(s => s.Pending), "{message}", "Pending messages (requires MaintenanceOptions.StatisticsInterval).");
         _meter.CreateObservableGauge("dbrelay.messages.processing", () => Observe(s => s.Processing), "{message}", "Messages currently claimed.");
@@ -79,6 +81,8 @@ internal sealed class DbRelayMetrics : IDisposable
         _claimDuration.Record(duration.TotalSeconds);
         _claimBatchSize.Record(count);
     }
+
+    public void RecordAcknowledgementBatch(int count) => _ackBatchSize.Record(count);
 
     public void UpdateStatistics(OutboxStatistics statistics) => _statistics = statistics;
 

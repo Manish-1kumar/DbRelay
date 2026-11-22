@@ -345,6 +345,9 @@ Metrics:
 | `dbrelay.delivery.duration` | histogram | `s` | Handler duration (tag `dbrelay.outcome`) |
 | `dbrelay.claim.duration` | histogram | `s` | Claim query duration |
 | `dbrelay.claim.batch_size` | histogram | `{message}` | Messages per claim |
+| `dbrelay.ack.batch_size` | histogram | `{message}` | Delivered acknowledgements written per round trip (batched acknowledgements) |
+| `dbrelay.delivery.abandoned` | counter | `{delivery}` | Handler invocations abandoned because they ignored cancellation |
+| `dbrelay.delivery.abandoned.active` | gauge | `{handler}` | Abandoned handlers still running (delivery pauses at the limit) |
 | `dbrelay.messages.pending` | gauge | `{message}` | Pending messages* |
 | `dbrelay.messages.processing` | gauge | `{message}` | Claimed messages* |
 | `dbrelay.messages.dead_lettered.current` | gauge | `{message}` | Messages currently dead-lettered* |

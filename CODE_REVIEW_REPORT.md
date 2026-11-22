@@ -937,3 +937,371 @@ also **mutation-checked**: the fix was reverted temporarily, the new test confir
 
 **Open Critical/High: none.** No independent re-audit of these FU fixes has been done yet. The evidence is the architect's
 test runs plus the two mutation checks.
+
+---
+
+## Batched acknowledgements review (2026-11-22)
+
+**Reviewer:** code-reviewer (independent; did not write this code)
+
+**Scope:**
+- `src/DbRelay/Storage/IOutboxBatchStore.cs`
+- `src/DbRelay/Dispatching/AcknowledgementBatcher.cs`
+- `OutboxDispatcher` (creation and completion of the batcher, the batched delivered path, batched `ReleaseAsync`)
+- the `DispatcherState` abandoned-handler counter
+- the PostgreSQL and SQL Server batch statements and stores
+- `DispatcherOptions.BatchAcknowledgements`
+- the new tests
+
+ADR 0003, code comments and the benchmark docs were treated as claims to check, not as evidence.
+
+**Method:**
+- Read the code.
+- Re-ran the four test projects in the repository on net10.0.
+- Ran a scratch harness against PostgreSQL 17.5 (localhost:55432) and SQL Server Express (`dbrelay_tests` and `dbrelay_tests_rcsi`). The harness drives the real stores, and the internal `AcknowledgementBatcher` through reflection.
+- Ran mutation checks in a **copy** of the repository in the scratchpad (`ba\mut`), so no repository source file was ever modified. Every mutated file in the copy was restored, and its SHA-256 matched the repository file afterwards. `AcknowledgementBatcher.cs` hash: `615CECE1…2395`, unchanged in the repository before and after.
+- Cleanup: every scratch schema (`ba_*`) was dropped, and 0 remain on all three databases. The `soak_*` schemas and the `DbRelay.Soak` processes were not touched.
+
+**Evidence:**
+- **Verified** means reproduced or measured by running something.
+- **Reasoned** means derived from reading the code.
+
+### Test results (run by me, net10.0, Release, in the repository)
+
+| Project | Result |
+|---|---|
+| `DbRelay.Tests` | 101/101 passed, 0 skipped |
+| `DbRelay.PostgreSql.Tests` | 79/79 passed, 0 skipped |
+| `DbRelay.SqlServer.Tests` | 103/103 passed, 0 skipped (RCSI off and on) |
+| `DbRelay.IntegrationTests` | 19/19 passed, 0 skipped |
+
+### Mutation checks (in the scratchpad copy)
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | Old loop condition `while (!pending.Completion.Task.IsCompleted && _leader.Wait(0))` | **The architect's claim holds.** `A_follower_that_enqueues_just_before_the_leader_releases_is_not_stranded` fails with `TimeoutException` at `DispatcherTests.cs:437`, and passes on the restored code. `Acknowledgement_batcher_never_strands_a_waiter_under_heavy_contention` **passed 3/3 runs** under the same mutation (BA-11). |
+| M2 | Batcher re-read disabled | Killed by a single test, `An_acknowledgement_that_committed_but_timed_out_is_not_reported_as_a_lost_lease`, which takes the one-item fast path (BA-12). |
+| M3 | SQL Server batch join without `m.[lock_token] = a.[token]` (both batch statements) | Killed: 4 conformance failures (RCSI off and on). |
+| M4 | PostgreSQL `MarkDeliveredBatchSql` without the token predicate | Killed: 2 conformance failures. |
+| M5 | PostgreSQL `ReleaseBatchSql` without the token predicate | **Survived** the full PostgreSQL suite (79/79) (BA-02). |
+| M6 | SQL Server release batch without the token predicate | **Survived** the full SQL Server suite (103/103), and with M5 the integration suite (19/19) (BA-02). |
+
+### Answers to the review questions
+
+1. **Leader/follower protocol (up to 4 leaders).**
+   - **No lost wake-up on the normal path** (Reasoned; M1 confirms the fix). A follower's failed `Wait(0)` means every slot was held after its enqueue. Each holder re-checks `IsEmpty` after releasing, and any thread that wins a slot drains until it sees the queue empty.
+   - **An item is never flushed twice or by two leaders:** `ConcurrentQueue.TryDequeue` hands each item out once.
+   - **`CompleteAsync` cannot deadlock or miss items in the dispatcher.** It runs after `Task.WhenAll` over every tracked delivery, and every batcher caller is a tracked delivery, so the queue is empty and every slot is free. It does not re-check the queue after releasing (BA-09).
+   - **No race with `Dispose`:** `_batcher.Dispose()` runs after `WhenAll` and `CompleteAsync`. The dispatcher's own `Dispose` does not touch the batcher.
+   - **Abandoned handlers and shutdown:** a delivery whose handler was abandoned, or that was interrupted at shutdown or abort, never reaches the batcher (`OutboxDispatcher.cs:346-376`), so a leader is always a successful delivery. The batcher ignores `_abort`; each flush is bounded by 3 × 15 s plus the re-reads.
+   - **Exception paths are not covered.** If logging throws on the leader's error path, followers are stranded (BA-01, Verified).
+2. **Guard semantics.**
+   - **Every batched row is guarded by its own token** on both providers. Verified by M3 and M4, and by harness runs where a stale `ReleaseBatch` item left the new owner's row untouched on all three databases.
+   - **SQL Server padding never outputs or updates a row twice** (Verified):
+     - 3 distinct items in bucket 4 produced 3 OUTPUT rows;
+     - 1 item repeated 64 times produced 1 row;
+     - the plan has a `Distinct Sort` over the `VALUES` rows and a `Stream Aggregate` before the update.
+   - **Mis-report:** results are keyed by message ID only, so a stale-token duplicate of a current item is reported as recorded (BA-03, Verified).
+   - **`[status] = 1`:** correct and redundant, because a non-null token implies Processing. It is consistent per provider: SQL Server has it in the single-row and batch statements, PostgreSQL in neither.
+3. **Failure handling.**
+   - **No false "recorded" from the re-read path** (Reasoned). A false "lease lost" occurs only when the re-read itself fails, which is the same conservative behaviour as the single-row path.
+   - **Other false "recorded" sources:** BA-03, and theoretically BA-08.
+   - **Deadlocks:** no production cycle found (BA-07).
+     - SQL Server orders lock acquisition by (id, token) through the plan's `Distinct Sort` (Verified plan). Claims use `READPAST`, and single-row statements lock one row (Reasoned).
+     - A stale SQL Server item does wait on a locked row (`LCK_M_U`, both RC and RCSI, Verified).
+     - PostgreSQL does not wait on stale items (Verified).
+   - **SQL Server deadlock retry is safe:** the statement is autocommitted and fully rolled back, and it is guarded. The result set is shared across attempts (BA-08).
+4. **Liveness and fairness.**
+   - **A leader keeps its slot while acknowledgements keep arriving** (BA-05, Verified). There is no unbounded stall:
+     - the queue holds at most `MaxConcurrency` items, because every caller holds a slot;
+     - after stop, no new deliveries start, so leaders exit.
+   - **Worst-case waits grow under database distress**, because re-reads are serial (BA-04, Verified).
+5. **Performance.**
+   - **SQL Server:**
+     - at most 128 parameters per statement (64 × 2), far below the 2,100 limit;
+     - 12 batch statement texts per table (6 buckets × 2 operations), so no plan-cache bloat;
+     - `FORCESEEK` gives `ux_..._id` seeks plus key lookups (Verified plan), and padding costs no extra seeks because the `Distinct Sort` removes duplicates first.
+   - **PostgreSQL:** one text per operation. With 200,000 rows, both custom and generic plans are a nested loop over `outbox_messages_pkey`: 0.15–0.7 ms for 2 items and 3.9–4.9 ms for 256 items (Verified).
+   - **`MaxBatchSize = 500` is unreachable** (BA-09). With `MaxConcurrency` above 64, SQL Server runs up to 4 sequential chunks inside one 15 s timeout.
+6. **Tests.**
+   - The architect's mutation claim holds (M1).
+   - The contention test does not detect the regression (BA-11).
+   - The release guard is untested (BA-02).
+   - Other gaps are listed in BA-12.
+
+### Findings
+
+| Severity | Count | IDs |
+|---|---|---|
+| Critical | 0 | none |
+| High | 0 | none |
+| Medium | 2 | BA-01, BA-02 |
+| Low | 6 | BA-03, BA-04, BA-05, BA-06, BA-11, BA-12 |
+| Info | 4 | BA-07, BA-08, BA-09, BA-10 |
+
+#### BA-01 (Medium): the leader's error path is not exception-safe; a throwing logger strands followers and leaks their slots
+
+- **File:** `src/DbRelay/Dispatching/AcknowledgementBatcher.cs:72-91, 141-149, 176-191`
+- **Failure scenario:**
+  - `Log.OutcomePersistRetry` (`:179`), `Log.OutcomePersistFailed` (`:184`) and `Log.ProcessingFailed` (`:144`) run **before** the pending items are completed. `Microsoft.Extensions.Logging.Logger` rethrows provider failures as `AggregateException`.
+  - If logging throws while the database is failing, two things go wrong:
+    - (a) items already dequeued into the failed batch are never completed;
+    - (b) the leader leaves `MarkDeliveredAsync` by exception without re-checking the queue, so followers that are still queued wait until some later acknowledgement arrives, possibly never.
+  - Each stranded follower holds a delivery slot. `ExecuteAsync`'s `Task.WhenAll` then never completes, so shutdown always runs into the host timeout, and the batcher ignores `_abort`.
+  - The unbatched path has no equivalent: a throwing logger there faults one delivery task, and its slot is released.
+- **Evidence:** Verified. Harness `throwlog`: logger that throws, store that fails, `maxConcurrency` 1, 3 followers. Result: the leader threw `AggregateException`, **0/3 followers completed within 5 s**, and 3 were still queued.
+- **Recommendation:**
+  - Complete every dequeued item in a `finally`, failing anything not yet completed with `null`, before any logging.
+  - Wrap the batcher's log calls so that they cannot throw.
+  - On any exception, the leader must still release its slot and re-check the queue.
+  - Add a unit test with a throwing logger.
+- **Status:** Open
+
+#### BA-02 (Medium): no test protects the lock-token guard of `ReleaseBatchAsync` on either provider
+
+- **File:**
+  - `tests/DbRelay.Storage.Conformance/OutboxStoreConformanceTests.cs:589-612`
+  - guards at `src/DbRelay.PostgreSql/Internal/PostgreSqlSettings.cs:100-107` and `src/DbRelay.SqlServer/Internal/SqlServerOutboxSql.cs:117-119,295-302`
+- **Failure scenario:**
+  - The release test pairs its only mismatched token with a row that is also listed with its valid token, so an unguarded release produces the same result.
+  - The guard is load-bearing. `DispatchBatchAsync` batch-releases unstarted messages on the "insufficient lease time remaining" path (`OutboxDispatcher.cs:251-259`), which is exactly when another worker may already have reclaimed them.
+  - An unguarded regression would reset the new owner's claim to Pending, decrement its attempt count, and clear `locked_by`. That violates invariant 4, and no test would notice.
+- **Evidence:** Verified.
+  - M5 and M6 (token predicate removed from the release batch statement) survive the full PostgreSQL suite (79/79), the SQL Server suite (103/103) and the integration suite (19/19).
+  - The current code is correct. Harness `release-guard` on all three databases: `ReleaseBatch([(X, stale), (Z, valid)])` released only Z, and X stayed Processing with attempt 2 and `locked_by = w2`.
+- **Recommendation:** Add a conformance test:
+  1. Claim X and Z with T1.
+  2. Expire X and reclaim it with T2.
+  3. Call `ReleaseBatchAsync([(X, T1), (Z, T1)])`. Use at least 2 items, so that SQL Server takes the batch statement and not the single-row path.
+  4. Assert the result is {Z}, and that X still has status 1, its attempt count and `locked_by`.
+- **Status:** Open
+
+#### BA-03 (Low): batch results are keyed by message ID only, so a stale-token duplicate is reported as "recorded"
+
+- **File:**
+  - `src/DbRelay/Storage/IOutboxBatchStore.cs:28-29`
+  - `src/DbRelay/Dispatching/AcknowledgementBatcher.cs:195-200`
+  - `PostgreSqlSettings.cs:97`
+  - `SqlServerOutboxSql.cs:298`
+- **Failure scenario:**
+  - An acknowledgement for claim T1 is delayed past its lease (for example by BA-04, or a slow database). The same dispatcher reclaims the message with T2 and delivers it again.
+  - (X, T1) and (X, T2) are then flushed in one batch. Only T2 matches, but the result `{X}` makes **both** waiters report `true`.
+  - Consequences: the lease-lost warning (1007) and the `dbrelay.lease.lost` metric are suppressed, and "Delivered" is logged and counted twice. The database state is correct.
+  - The return type is part of a public SPI. Fixing this after 1.0 would be a breaking change.
+- **Evidence:** Verified.
+  - Store level, on PostgreSQL, SQL Server RC and SQL Server RCSI: the result count is 1 and contains the ID.
+  - Batcher level, on PostgreSQL: stale-token waiter `True`, current-token waiter `True`, and the row was updated once.
+- **Recommendation:**
+  - Return the matched (id, token) pairs. PostgreSQL: `RETURNING m.id, a.token`. SQL Server: `OUTPUT inserted.[id], deleted.[lock_token]`.
+  - Alternatively, have the batcher send duplicate IDs in separate round trips.
+  - Add a test.
+- **Status:** Open
+
+#### BA-04 (Low): after an ambiguous batch failure, re-reads run one at a time while every batch member holds its slot
+
+- **File:**
+  - `src/DbRelay/Dispatching/AcknowledgementBatcher.cs:196-211`
+  - `src/DbRelay.SqlServer/Internal/SqlServerOutboxStore.cs:240-285`
+- **Failure scenario:**
+  - Every item missing from a retried attempt is re-read with a sequential full-row `GetAsync`. That row includes the payload, up to 256 MiB.
+  - Each re-read can take up to the 15 s timeout, and the leader and all followers in the batch wait for all of them. Worst case is about `MaxConcurrency × 15 s`: 2 min at the default of 8, about 64 min at 256. That comes on top of up to about 46 s of attempts.
+  - Unbatched deliveries re-read in parallel, about 15 s each.
+  - On SQL Server, a failure in chunk *k* discards the results of the already committed chunks 1 to *k*−1, which forces those re-reads.
+  - Followers' acknowledgements can then land after their leases expire. Delivery stays at-least-once, but redeliveries and false lease-lost reports increase.
+- **Evidence:** Verified. Probe: 8 followers, re-read 200 ms each. Result: 8 re-reads at peak concurrency 1; the first follower completed after 429 ms and all of them after 1,866 ms. Parallel re-reads would take about 400 ms.
+- **Recommendation:**
+  - Re-read the missing items with one narrow query (`id, status, attempt_count, locked_by` for the set of IDs), or in parallel with a bound.
+  - Keep per-chunk results on SQL Server.
+- **Status:** Open
+
+#### BA-05 (Low): under sustained load a leader holds its delivery slot indefinitely, and up to 4 slots can be held this way, not "at most one"
+
+- **File:**
+  - `src/DbRelay/Dispatching/AcknowledgementBatcher.cs:47,72-91`
+  - `docs/decisions/0003-spi-evolution-and-batched-acknowledgements.md:23,31-32,52`
+- **Failure scenario:**
+  - A leader returns only when it observes an empty queue after releasing its slot. While acknowledgements keep arriving, its own delivery holds its slot, and its "Delivered" log and `RecordActivity` are delayed, although its own row was recorded long before.
+  - With `_maxLeaders = clamp(MaxConcurrency / 4, 1, 4)`, up to 4 slots (25% of concurrency) can be held this way.
+  - The ADR says "a single flusher" and "this costs at most one slot", and that slot holding is "as before". All three are now inaccurate.
+  - There is no deadlock: the queue holds at most `MaxConcurrency` items, and it drains after stop (Reasoned).
+- **Evidence:** Verified. Probe with a 20 ms flush for 3 s:
+  - 4 slots (1 leader): the longest `MarkDeliveredAsync` took 1,396 ms, about 70 flush times;
+  - 8 slots (2 leaders): 643 ms.
+- **Recommendation:**
+  - Bound leadership: after the leader's own item is done and K more rounds have run, hand off explicitly to a waiting follower. A simple early exit would strand followers.
+  - Correct the ADR and the class documentation.
+- **Status:** Open
+
+#### BA-06 (Low): a failed batch logs only the first message ID; the other N−1 messages are never named
+
+- **File:**
+  - `src/DbRelay/Dispatching/AcknowledgementBatcher.cs:144,179,184`
+  - `src/DbRelay/Dispatching/OutboxDispatcher.cs:398-417`
+- **Failure scenario:**
+  - Events 1008, 1009 and 1011 carry `batch[0].Details.Id`, with the outcome `"delivered (batch of N)"`.
+  - When the result is `null`, `DeliverAsync` logs nothing. The other messages that may be redelivered are therefore never logged.
+  - The structured `Outcome` field now takes unbounded values, which breaks filters on `Outcome = "delivered"`.
+- **Evidence:** Reasoned.
+- **Recommendation:**
+  - Log a per-message 1009 in `DeliverAsync` when `recorded == null`.
+  - Keep `Outcome = "delivered"` and add the batch size as a separate field.
+- **Status:** Open
+
+#### BA-07 (Info): SQL Server stale batch items wait on locked rows; no production deadlock cycle found
+
+- **File:**
+  - `src/DbRelay.SqlServer/Internal/SqlServerOutboxSql.cs:295-302`
+  - `src/DbRelay.PostgreSql/Internal/PostgreSqlSettings.cs:92-107`
+- **Observation:**
+  - **SQL Server:** an item whose token no longer matches still requests a U lock on its row. While another session holds that row, the **whole** batch waits (`LCK_M_U`, under both RC and RCSI).
+  - **PostgreSQL:** stale items do not wait (156 ms with the row locked).
+  - **No cycle** was found between batches, claims (`READPAST`), single-row statements, cleanup or requeue:
+    - the plan sorts the `VALUES` rows with a `Distinct Sort` on (id, token), then seeks `ux_..._id` in that order;
+    - a blocking `Sort` on `sequence` precedes the update, so all batches acquire locks in one global order.
+  - The harness produced a 1205 only by holding a lock across two statements in an explicit transaction, which production never does.
+  - **Residual risk:** the ordering is an optimizer choice. A hash aggregate would lose it.
+- **Evidence:**
+  - Verified: the blocking behaviour, the plan operators and their sort keys.
+  - Reasoned: the absence of a cycle.
+- **Recommendation:**
+  - Sort items by ID on the client before sending them (defence in depth; it also makes the PostgreSQL lock order deterministic).
+  - Add a SQL Server stress test with concurrent batches, claims and stale items.
+- **Status:** Open
+
+#### BA-08 (Info): the SQL Server deadlock retry reuses one result set across attempts
+
+- **File:**
+  - `src/DbRelay.SqlServer/Internal/SqlServerOutboxStore.cs:240,257-282`
+  - `src/DbRelay.SqlServer/Internal/SqlServerConnectionSource.cs:66-87`
+- **Observation:**
+  - `updated` is filled inside the lambda that `ExecuteAsync` retries on error 1205. SQL Server may return OUTPUT rows of a statement that then fails and rolls back. Those IDs would stay in the result, and if the retry did not update them (a lease expired and the row was reclaimed in the 5–50 ms gap), they would be reported as recorded.
+  - With the current plan, 0 OUTPUT rows reached the client before 1205, because the blocking `Sort` precedes the update. The issue is therefore theoretical.
+  - Otherwise the retry is safe: the statement is autocommitted, fully rolled back and guarded.
+- **Evidence:**
+  - Verified: 0 rows were read before 1205.
+  - Reasoned: the rest.
+- **Recommendation:** Collect results per attempt, and merge them only when the attempt succeeds.
+- **Status:** Open
+
+#### BA-09 (Info): stale comments, unreachable limits, and a `CompleteAsync` precondition
+
+- **File:**
+  - `src/DbRelay/Dispatching/OutboxDispatcher.cs:157`
+  - `src/DbRelay/Dispatching/AcknowledgementBatcher.cs:18,97-113`
+  - ADR 0003 `:23`
+- **Notes:**
+  - `OutboxDispatcher.cs:157` says "this just stops its flusher", but there is no flusher.
+  - `MaxBatchSize = 500` is unreachable: every caller holds a delivery slot, so the queue holds at most `MaxConcurrency` (≤ 256) items.
+  - `CompleteAsync` releases its slots without re-checking the queue. It is safe only because nothing can call `MarkDeliveredAsync` concurrently. Document that precondition, or assert it (`QueuedCount == 0`).
+  - The test seam `BeforeLeaderReleaseForTesting` is checked in production on every leadership round. Its cost is negligible.
+- **Evidence:** Reasoned.
+- **Status:** Open
+
+#### BA-10 (Info): the abandoned-handler counter is sound, but a throwing cancellation callback skips it
+
+- **File:**
+  - `src/DbRelay/Dispatching/DispatcherState.cs:54-58`
+  - `src/DbRelay/Dispatching/OutboxDispatcher.cs:351-352,471-495`
+- **Observation:**
+  - The single atomic counter is correct. There is one increment per `ObserveAbandoned`, one decrement in its continuation (which runs inline if the handler already finished), and readers use `Volatile.Read`.
+  - However, `await linked.CancelAsync()` runs **before** `ObserveAbandoned`. If a cancellation callback that the handler registered throws:
+    - `CancelAsync` throws `AggregateException`;
+    - the orphan is never counted, which bypasses the FU-02 cap, and its fault is never observed;
+    - the message is scheduled for retry while the handler is still running.
+- **Evidence:** Reasoned.
+- **Recommendation:** Call `ObserveAbandoned` first, or catch exceptions from `CancelAsync`.
+- **Status:** Open
+
+#### BA-11 (Low, tests): the contention test does not detect the lost-wake-up regression
+
+- **File:** `tests/DbRelay.Tests/DispatcherTests.cs:386-410`
+- **Failure scenario:**
+  - The test's comment presents it as the regression test for this race.
+  - With the old loop condition (M1), it passed 3/3 runs on this machine. Only the deterministic hook test (`:413-438`) catches the regression.
+- **Evidence:** Verified (M1).
+- **Recommendation:**
+  - Describe it as a smoke test, or make it effective, for example by enabling a randomized delay in `BeforeLeaderReleaseForTesting`.
+  - Keep the deterministic test.
+- **Status:** Open
+
+#### BA-12 (Low, tests): important paths that are untested
+
+- **File:**
+  - `tests/DbRelay.Tests/DispatcherTests.cs`
+  - `tests/DbRelay.Storage.Conformance/OutboxStoreConformanceTests.cs`
+- **Gaps:**
+  - (a) **Multi-item ambiguous commit followed by a re-read.** `CommitThenFailOnce` is used only in single-message tests, which take the one-item fast path. M2 is killed only by that test. The fake already models a partial multi-item commit.
+  - (b) **SQL Server one-item tail chunk and partial chunk failure.** The tail chunk occurs at 65, 129 and 193 items. The full-batch test uses 1,000 items (15 × 64 + 40), which never produces a one-item tail chunk.
+  - (c) **Duplicate IDs with different tokens** (BA-03).
+  - (d) **Fallback of the dispatcher's batched `ReleaseAsync`** to per-message releases when `ReleaseBatchAsync` throws.
+  - (e) **Exception safety of the batcher** (BA-01).
+  - (f) **SQL Server lock behaviour under concurrent batches** (BA-07).
+- **Evidence:** Verified for (a) by M2 and a grep; Reasoned for the rest.
+- **Recommendation:** Add the tests listed; (a), (b) and (d) are cheap with the existing fakes and conformance helpers.
+- **Status:** Open
+
+### Commands run in this review
+
+All commands were run after dot-sourcing `env.ps1` from the scratchpad.
+
+| Command | Outcome |
+|---|---|
+| `dotnet test --project tests/DbRelay.Tests/DbRelay.Tests.csproj -c Release -f net10.0` | 101/101 passed, 0 skipped |
+| `dotnet test --project tests/DbRelay.PostgreSql.Tests/DbRelay.PostgreSql.Tests.csproj -c Release -f net10.0` | 79/79 passed, 0 skipped |
+| `dotnet test --project tests/DbRelay.SqlServer.Tests/DbRelay.SqlServer.Tests.csproj -c Release -f net10.0` | 103/103 passed, 0 skipped |
+| `dotnet test --project tests/DbRelay.IntegrationTests/DbRelay.IntegrationTests.csproj -c Release -f net10.0` | 19/19 passed, 0 skipped (55.7 s) |
+| `robocopy` of the repository (excluding bin, obj and .git) to `scratchpad\ba\mut` | Copy for mutation checks |
+| Baseline: deterministic test in the copy (`--filter-method`) | 1/1 passed |
+| M1: deterministic test | **Failed**: `TimeoutException` at `DispatcherTests.cs:437` |
+| M1: contention test × 3 (`--no-build`) | Passed 3/3 |
+| M2: full `DbRelay.Tests` | 100/101; only the CR-10 single-message test failed |
+| M3: SQL Server `*Batch_*` | 6/10; 4 failed |
+| M4: PostgreSQL `*Batch_*` | 4/6; 2 failed |
+| M5: full PostgreSQL suite | 79/79 passed (mutation survived) |
+| M6: full SQL Server suite | 103/103 passed (mutation survived) |
+| M5 + M6: integration suite | 19/19 passed (mutations survived) |
+| Restore of the copy, then hash comparison with the repository | 3/3 files identical |
+| `dotnet build scratchpad\ba\harness` (references the Release DLLs) | Succeeded, 0 errors |
+| Harness `ss-dup` (RC and RCSI) | Padding output 3 rows of 3; 64 copies output 1 row; same ID with two tokens gave result `{id}`; plan: `Distinct Sort` → `ux_id` seek → key lookup → `Sort(sequence)` → `Stream Aggregate` → update |
+| Harness `ss-deadlock` (RC and RCSI) | A stale item blocks on `LCK_M_U`; a cycle needs a multi-statement transaction (1205 was raised with 0 OUTPUT rows read first) |
+| Harness `pg-block` | A stale item does not wait (156 ms); same ID with two tokens gave result `{id}` |
+| Harness `pg-explain` (200,000 rows) | Nested loop over the primary key in custom and generic plans; 256 items in 3.9–4.9 ms |
+| Harness `batcher` | BA-03 confirmed at batcher level; re-reads serial (peak 1, 1,866 ms for 8); leader held 1,396 ms at 4 slots |
+| Harness `throwlog` | BA-01: leader threw; 0/3 followers completed in 5 s |
+| Harness `release-guard` | Stale release item untouched on all three databases |
+| Harness `cleanup-check` | 0 `ba_*` schemas on PostgreSQL, `dbrelay_tests` and `dbrelay_tests_rcsi` |
+
+**Not run:**
+- the full solution build, which would rebuild `DbRelay.Soak` under the running soak;
+- other target frameworks;
+- `dotnet format`;
+- `dotnet pack`.
+
+### Verdict
+
+**No open Critical or High findings for batched acknowledgements. Two open Medium findings: BA-01 (followers stranded when logging throws) and BA-02 (release token guard untested).**
+
+---
+
+## Batched acknowledgements: resolution log (principal architect, 2026-11-22)
+
+All findings above were addressed or accepted. Re-verified on net10.0: unit 104/104, PostgreSQL 84/84, SQL Server 113/113,
+0 skipped. Mutation-checked: the BA-02 test fails when the release token guard is removed, on PostgreSQL and on SQL Server
+(RCSI off and on), where previously that mutation survived every suite.
+
+| ID | Sev | Resolution | Evidence |
+|---|---|---|---|
+| BA-01 | Medium | **Fixed.** `DrainAsync` never throws: every dequeued item is completed in a `finally`, and all batcher logging goes through a non-throwing `SafeLog`. The leader therefore always releases and re-checks the queue. | Unit `A_throwing_logger_and_a_failing_store_never_strand_waiters` (every log call throws, every store call fails; all 12 waiters complete with null) |
+| BA-02 | Medium | **Fixed (test).** The guard was already correct. | Conformance `Batch_release_never_touches_a_message_reclaimed_by_another_worker`; mutation-checked on both providers |
+| BA-03 | Low | **Fixed.** Pre-release SPI change: `IOutboxBatchStore` methods return matched `OutboxAcknowledgement` (id, token) pairs (PostgreSQL `RETURNING m.id, a.token`; SQL Server `OUTPUT inserted.[id], deleted.[lock_token]`), and the batcher matches on pairs. | Conformance `Batch_results_distinguish_a_stale_and_a_current_token_for_the_same_message` |
+| BA-04 | Low | **Fixed (partly).** Re-reads after an ambiguous failure run in parallel, bounded at 8. Accepted: on SQL Server, a mid-batch chunk failure still forces re-reads of committed chunks (correct, just slower). | Unit `A_multi_item_batch_that_committed_but_reported_failure_is_recovered_by_re_reading` |
+| BA-05 | Low | **Accepted; documentation corrected.** ADR 0003 and class remarks now state up to `clamp(MaxConcurrency/4,1,4)` slots and the delayed leader log/activity. A bounded hand-off is deferred. | |
+| BA-06 | Low | **Fixed.** A failed batch logs event 1016 (with batch size) plus event 1009 per message with `Outcome = "delivered"`. Retries log 1015. | |
+| BA-07 | Info | Accepted. The plan orders locks by (id, token); no cycle found. Client-side sorting would not match SQL Server `uniqueidentifier` ordering. A stress test is a follow-up. | |
+| BA-08 | Info | **Fixed.** SQL Server results are collected per attempt and merged only on success. | |
+| BA-09 | Info | **Fixed.** Stale comments corrected; `MaxBatchSize` documented as a safety limit; the `CompleteAsync` no-concurrent-callers precondition is documented. | |
+| BA-10 | Info | **Fixed.** `ObserveAbandoned` runs before `CancelAsync`, and exceptions from the handler's cancellation callbacks are caught. | |
+| BA-11 | Low | **Fixed.** Renamed `..._under_heavy_contention_smoke`, with a comment pointing to the deterministic regression test. | |
+| BA-12 | Low | **Fixed (most).** Added: a multi-item ambiguous commit (a real 2-item batch, asserted); SQL Server chunk tails at 65/129/100 items with a stale tail; duplicate ids with different tokens; the dispatcher's per-message fallback when batched release throws. Not added: a SQL Server lock-behaviour stress test (BA-07 follow-up). | Unit `Shutdown_falls_back_to_per_message_release_when_the_batched_release_fails`; conformance `Batch_acknowledgements_handle_chunk_boundaries` |
+
+**Open Critical/High: none. Open Medium: none.**

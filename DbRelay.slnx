@@ -12,6 +12,7 @@
     <Project Path="tests/DbRelay.SqlServer.Tests/DbRelay.SqlServer.Tests.csproj" />
     <Project Path="tests/DbRelay.IntegrationTests/DbRelay.IntegrationTests.csproj" />
     <Project Path="tests/DbRelay.CrashWorker/DbRelay.CrashWorker.csproj" />
+    <Project Path="tests/DbRelay.Soak/DbRelay.Soak.csproj" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/PostgreSql.Sample/PostgreSql.Sample.csproj" />

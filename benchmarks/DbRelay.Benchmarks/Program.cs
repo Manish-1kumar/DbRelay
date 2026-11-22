@@ -13,6 +13,21 @@ switch (mode)
         BenchmarkSwitcher.FromTypes([typeof(EnqueueBenchmarks)]).Run(args[1..]);
         break;
 
+    case "repeat":
+        // repeat <provider> <messages> <batch> <concurrency> <workers> <reps> [output.md]
+        // Alternates batching off/on <reps> times for one configuration, to separate real differences from machine noise.
+        ClaimCounter.EnsureStarted();
+        var p = Enum.Parse<Provider>(args[1]);
+        int I(int i) => int.Parse(args[i], System.Globalization.CultureInfo.InvariantCulture);
+        var repeated = await ThroughputHarness.RepeatAsync(p, I(2), I(3), I(4), I(5), I(6));
+        if (args.Length > 7)
+        {
+            await File.AppendAllTextAsync(args[7], repeated);
+        }
+
+        Console.WriteLine(repeated);
+        break;
+
     case "throughput":
         ClaimCounter.EnsureStarted();
         var provider = Enum.Parse<Provider>(args.Length > 1 ? args[1] : "PostgreSql");

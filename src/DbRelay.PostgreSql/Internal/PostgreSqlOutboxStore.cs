@@ -10,7 +10,7 @@ namespace DbRelay.PostgreSql.Internal;
 /// The PostgreSQL <see cref="IOutboxStore"/>. Every statement is a single, short, autocommitted command except
 /// <see cref="InsertAsync"/>, which runs on the caller's connection and transaction. All times come from the database clock.
 /// </summary>
-internal sealed class PostgreSqlOutboxStore : IOutboxStore
+internal sealed class PostgreSqlOutboxStore : IOutboxStore, IOutboxBatchStore
 {
     private readonly NpgsqlDataSource _dataSource;
     private readonly PostgreSqlSettings _settings;
@@ -331,6 +331,53 @@ internal sealed class PostgreSqlOutboxStore : IOutboxStore
         }
 
         await batch.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task<IReadOnlyCollection<OutboxAcknowledgement>> MarkDeliveredBatchAsync(IReadOnlyList<OutboxAcknowledgement> items, CancellationToken cancellationToken) =>
+        ExecuteGuardedBatchAsync(_settings.MarkDeliveredBatchSql, items, cancellationToken);
+
+    public Task<IReadOnlyCollection<OutboxAcknowledgement>> ReleaseBatchAsync(IReadOnlyList<OutboxAcknowledgement> items, CancellationToken cancellationToken) =>
+        ExecuteGuardedBatchAsync(_settings.ReleaseBatchSql, items, cancellationToken);
+
+    private async Task<IReadOnlyCollection<OutboxAcknowledgement>> ExecuteGuardedBatchAsync(
+        string sql, IReadOnlyList<OutboxAcknowledgement> items, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        if (items.Count == 0)
+        {
+            return [];
+        }
+
+        if (items.Count > OutboxLimits.MaxClaimBatchSize)
+        {
+            throw new ArgumentOutOfRangeException(nameof(items), items.Count, $"At most {OutboxLimits.MaxClaimBatchSize} items per batch.");
+        }
+
+        var ids = new Guid[items.Count];
+        var tokens = new Guid[items.Count];
+        for (var i = 0; i < items.Count; i++)
+        {
+            ids[i] = items[i].MessageId;
+            tokens[i] = items[i].LockToken;
+        }
+
+        var command = CreateCommand(sql);
+        await using (command.ConfigureAwait(false))
+        {
+            command.Parameters.Add(new NpgsqlParameter<Guid[]> { TypedValue = ids, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Uuid });
+            command.Parameters.Add(new NpgsqlParameter<Guid[]> { TypedValue = tokens, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Uuid });
+            var updated = new HashSet<OutboxAcknowledgement>();
+            var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            await using (reader.ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    updated.Add(new OutboxAcknowledgement(reader.GetGuid(0), reader.GetGuid(1)));
+                }
+            }
+
+            return updated;
+        }
     }
 
     private NpgsqlCommand CreateCommand(string sql)

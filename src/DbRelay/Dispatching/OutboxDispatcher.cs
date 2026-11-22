@@ -35,7 +35,7 @@ internal sealed class OutboxDispatcher : BackgroundService
     private const int PersistAttempts = 3;
     internal const string InterruptedByShutdownReason = "Delivery was interrupted by host shutdown.";
     private static readonly TimeSpan ClaimSafetyTimeout = TimeSpan.FromMinutes(5);
-    private int _liveAbandonedHandlers;
+    private AcknowledgementBatcher? _batcher;
 
     private readonly IOutboxStore _store;
     private readonly IServiceScopeFactory _scopeFactory;
@@ -121,6 +121,11 @@ internal sealed class OutboxDispatcher : BackgroundService
         _state.MarkRunning(true);
         Log.DispatcherStarted(_logger, _workerId, _options.BatchSize, _options.MaxConcurrency, _options.LeaseDuration);
 
+        // ADR 0003: batch "delivered" acknowledgements when the provider supports it (optional capability interface).
+        _batcher = _options.BatchAcknowledgements && _store is IOutboxBatchStore batchStore
+            ? new AcknowledgementBatcher(batchStore, _store, _options.MaxConcurrency, WasRecordedByThisClaimAsync, _metrics, _time, _logger)
+            : null;
+
         try
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -148,6 +153,16 @@ internal sealed class OutboxDispatcher : BackgroundService
             }
 
             await Task.WhenAll(remaining).ConfigureAwait(false);
+
+            // Every delivery has awaited its acknowledgement, so nothing is queued; this waits for any in-progress flush (there is
+            // no background thread) and satisfies CompleteAsync's no-concurrent-callers precondition.
+            if (_batcher is not null)
+            {
+                await _batcher.CompleteAsync().ConfigureAwait(false);
+                _batcher.Dispose();
+                _batcher = null;
+            }
+
             _state.MarkRunning(false);
             Log.DispatcherStopped(_logger, _workerId);
         }
@@ -163,7 +178,7 @@ internal sealed class OutboxDispatcher : BackgroundService
 
             // FU-02: abandoned handlers still hold a thread and a DI scope. Once the limit is reached, stop claiming
             // (the health check reports Degraded) instead of starting ever more doomed handlers.
-            if (Volatile.Read(ref _liveAbandonedHandlers) >= _abandonedHandlerLimit)
+            if (_state.AbandonedHandlers >= _abandonedHandlerLimit)
             {
                 await DelayAsync(_options.PollingInterval, stoppingToken).ConfigureAwait(false);
                 return null;
@@ -226,7 +241,7 @@ internal sealed class OutboxDispatcher : BackgroundService
                 return;
             }
 
-            if (Volatile.Read(ref _liveAbandonedHandlers) >= _abandonedHandlerLimit)
+            if (_state.AbandonedHandlers >= _abandonedHandlerLimit)
             {
                 // FU-02: the abandoned-handler limit is reached. Don't start more from this batch either.
                 slots.Release();
@@ -334,8 +349,17 @@ internal sealed class OutboxDispatcher : BackgroundService
                     // The handler ignored its cancellation token (CR-05). Stop waiting so it cannot hold a concurrency slot forever.
                     // Its eventual result is never recorded. Cancel its token explicitly first, so the orphan never holds a token whose
                     // sources are about to be disposed in a non-cancelled state (FU-09).
-                    await linked.CancelAsync().ConfigureAwait(false);
+                    // Count and observe the orphan first: a cancellation callback registered by the handler could throw from
+                    // CancelAsync, and the orphan must still be counted against the FU-02 limit and have its fault observed (BA-10).
                     ObserveAbandoned(handlerTask, details.Id);
+                    try
+                    {
+                        await linked.CancelAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                        // A handler's own cancellation callback failed; the handler is abandoned either way.
+                    }
                     if (_abort.IsCancellationRequested)
                     {
                         activity.SetError("abandoned at shutdown");
@@ -380,8 +404,22 @@ internal sealed class OutboxDispatcher : BackgroundService
         if (error is null && result!.Outcome == DeliveryOutcome.Delivered)
         {
             _metrics.RecordDelivery(details.MessageType, DeliveryOutcome.Delivered, elapsed);
-            var recorded = await PersistAsync(
-                details, "delivered", ct => _store.MarkDeliveredAsync(details.Id, lockToken, ct)).ConfigureAwait(false);
+            bool? recorded;
+            if (_batcher is { } batcher)
+            {
+                recorded = await batcher.MarkDeliveredAsync(details, lockToken).ConfigureAwait(false);
+                if (recorded == false)
+                {
+                    _metrics.LeaseLost();
+                    Log.LeaseLost(_logger, details.Id, details.MessageType, "delivered");
+                }
+            }
+            else
+            {
+                recorded = await PersistAsync(
+                    details, "delivered", ct => _store.MarkDeliveredAsync(details.Id, lockToken, ct)).ConfigureAwait(false);
+            }
+
             if (recorded == true)
             {
                 _metrics.Delivered(details.MessageType);
@@ -442,12 +480,12 @@ internal sealed class OutboxDispatcher : BackgroundService
 
     private void ObserveAbandoned(Task<DeliveryResult> handlerTask, Guid messageId)
     {
-        _state.SetAbandonedHandlers(Interlocked.Increment(ref _liveAbandonedHandlers));
+        _state.AbandonedHandlerStarted();
         _ = handlerTask.ContinueWith(
             static (task, state) =>
             {
                 var (self, id) = ((OutboxDispatcher, Guid))state!;
-                self._state.SetAbandonedHandlers(Interlocked.Decrement(ref self._liveAbandonedHandlers));
+                self._state.AbandonedHandlerFinished();
                 if (task.Exception is { } exception)
                 {
                     try
@@ -591,6 +629,34 @@ internal sealed class OutboxDispatcher : BackgroundService
 
     private async Task ReleaseAsync(IReadOnlyList<OutboxMessageDetails> messages, int startIndex, Guid lockToken, string reason)
     {
+        var count = messages.Count - startIndex;
+        if (count > 1 && _options.BatchAcknowledgements && _store is IOutboxBatchStore batchStore)
+        {
+            // CR-08 / ADR 0003: one round trip instead of one per message (a 100-message batch used to need 100 sequential releases).
+            try
+            {
+                var items = new OutboxAcknowledgement[count];
+                for (var i = 0; i < count; i++)
+                {
+                    items[i] = new OutboxAcknowledgement(messages[startIndex + i].Id, lockToken);
+                }
+
+                using var timeout = new CancellationTokenSource(PersistTimeout, _time);
+                var releasedIds = await batchStore.ReleaseBatchAsync(items, timeout.Token).ConfigureAwait(false);
+                if (releasedIds.Count > 0)
+                {
+                    _metrics.Released(releasedIds.Count);
+                    Log.Released(_logger, releasedIds.Count, reason);
+                }
+
+                return;
+            }
+            catch (Exception exception)
+            {
+                Log.ReleaseFailed(_logger, exception, messages[startIndex].Id); // fall back to one at a time below
+            }
+        }
+
         var released = 0;
         for (var i = startIndex; i < messages.Count; i++)
         {

@@ -52,6 +52,12 @@ internal static partial class Log
     [LoggerMessage(1014, LogLevel.Warning, "An abandoned delivery handler for message {MessageId} eventually failed.")]
     public static partial void AbandonedHandlerFaulted(ILogger logger, Exception exception, Guid messageId);
 
+    [LoggerMessage(1015, LogLevel.Warning, "Writing a batch of {Count} delivered acknowledgement(s) failed (attempt {Try}); retrying.")]
+    public static partial void AcknowledgementBatchRetry(ILogger logger, Exception exception, int count, int @try);
+
+    [LoggerMessage(1016, LogLevel.Error, "Writing a batch of {Count} delivered acknowledgement(s) failed. Each message is logged separately (event 1009) and will be claimed again after its lease expires.")]
+    public static partial void AcknowledgementBatchFailed(ILogger logger, Exception exception, int count);
+
     [LoggerMessage(1102, LogLevel.Warning, "DbRelay cleanup is behind: it deleted the per-run maximum of {Count} delivered message(s) and will run again in {Delay}.")]
     public static partial void CleanupBehind(ILogger logger, int count, TimeSpan delay);
 

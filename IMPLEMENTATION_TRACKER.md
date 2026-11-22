@@ -21,8 +21,10 @@ implementing agent reported.
 | T9.1 | Integration, crash, concurrency, interruption, security tests | qa-reliability | COMPLETED | 68/68 (×2 consecutive) | Reviewed; 2 tests revised for CR-05/CR-06 | Integration suite runs on PostgreSQL only |
 | T10.1 | Benchmarks | Architect | COMPLETED | `docs/benchmarks.md` | n/a | Single-machine baseline |
 | T11.1 | Docs and samples | docs-devex | COMPLETED | 3 samples built and run; snippets compiled | Architect spot-check and post-fix updates | NuGet README relative links (needs the repository URL) |
-| T12.1 | CI workflow, Dependabot, packaging | Architect | IMPLEMENTED - NOT VERIFIED | Pack + audit run locally | | Workflow never executed; needs a push (owner approval) |
-| T13.1 | Production-readiness audit | code-reviewer | IN PROGRESS | | Initial review done; follow-up verification running | |
+| T12.1 | CI workflow, Dependabot, packaging | Architect | COMPLETED | First GitHub Actions run green: 1,140/1,140, 0 skipped; PG 15/16/18 jobs green (run 44996266454) | | |
+| T13.1 | Production-readiness audit | code-reviewer | COMPLETED | 1,140 test runs after FU fixes, 0 failed | Initial review, follow-up audit (FU-01..FU-10) and resolution logs in CODE_REVIEW_REPORT.md | No independent re-audit of the FU fixes |
+| T15.1 | Batched acknowledgements + `IOutboxBatchStore` (ADR 0003) | Architect | REVIEWED | Unit 416/416 (104 × 4 TFMs); conformance batch tests on PG and SQL (RCSI off/on); interleaved A/B throughput (`docs/benchmarks.md` §3) | BA review: 0 Critical/High; BA-01..BA-12 fixed or accepted; BA-02 and the lost-wake-up fix mutation-checked | BA-05 bounded hand-off and BA-07 lock stress test deferred |
+| T16.1 | Soak/chaos harness and long runs | Architect | COMPLETED | PostgreSQL 2 h, SQL Server 1 h, PostgreSQL 30 min (final code): PASS 9/9 each, 0 lost (`docs/soak/`) | | Single machine; SQL Server Express |
 | T14.1 | Release candidate | Architect | IN PROGRESS | | | See RELEASE_CHECKLIST.md owner actions |
 
 ## Bugs found and fixed

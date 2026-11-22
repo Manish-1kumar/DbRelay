@@ -87,6 +87,25 @@ internal sealed class PostgreSqlSettings
             $"UPDATE {table} SET status = 0, available_at = now(), attempt_count = GREATEST(attempt_count - 1, 0), " +
             "lock_token = NULL, locked_by = NULL WHERE id = $1 AND lock_token = $2";
 
+        // ADR 0003 batch variants: each row is joined on (id, lock_token), so it is still guarded by its own token, and only rows
+        // that actually changed are returned.
+        MarkDeliveredBatchSql =
+            $"""
+            UPDATE {table} AS m SET status = 2, delivered_at = now(), lock_token = NULL
+            FROM unnest($1::uuid[], $2::uuid[]) AS a(id, token)
+            WHERE m.id = a.id AND m.lock_token = a.token
+            RETURNING m.id, a.token
+            """;
+
+        ReleaseBatchSql =
+            $"""
+            UPDATE {table} AS m SET status = 0, available_at = now(), attempt_count = GREATEST(m.attempt_count - 1, 0),
+                lock_token = NULL, locked_by = NULL
+            FROM unnest($1::uuid[], $2::uuid[]) AS a(id, token)
+            WHERE m.id = a.id AND m.lock_token = a.token
+            RETURNING m.id, a.token
+            """;
+
         DeleteDeliveredSql =
             $"""
             WITH picked AS MATERIALIZED (
@@ -159,6 +178,10 @@ internal sealed class PostgreSqlSettings
     public string MarkDeadLetteredSql { get; }
 
     public string ReleaseSql { get; }
+
+    public string MarkDeliveredBatchSql { get; }
+
+    public string ReleaseBatchSql { get; }
 
     public string DeleteDeliveredSql { get; }
 

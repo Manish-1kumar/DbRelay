@@ -120,3 +120,52 @@ dotnet run -c Release --project benchmarks/DbRelay.Benchmarks -- throughput SqlS
 
 Real handlers (a broker publish, an HTTP call) dominate these costs. With a 20 ms handler and the defaults (`MaxConcurrency`
 8), one instance tops out at about 400 msg/s from handler latency alone, so increase `MaxConcurrency` or add instances.
+
+## 3. Batched acknowledgements (ADR 0003), measured A/B (2026-11-22)
+
+**Method:**
+- Same machine and harness as section 2, all `PollingInterval` 100 ms.
+- Batching **off and on run back to back for every configuration**, in the same session, because this laptop's run-to-run noise is large: one configuration's "off" rate ranged 1,331–3,668 msg/s across three sweeps.
+- Configurations whose single sample showed a regression were then re-run **5 times interleaved** and compared by median.
+- Duplicates were **0 in every run (72 + 30)**.
+
+**Final design measured:**
+- leader/follower group commit, with up to `clamp(MaxConcurrency / 4, 1, 4)` concurrent leaders;
+- a batch of one uses the single-row statement;
+- SQL Server uses a `VALUES` join with `FORCESEEK`, at most 64 items per statement.
+
+### Change in msg/s, batching on vs off (single A/B sample per configuration)
+
+| Batch | Concurrency | Workers | PostgreSQL | SQL Server |
+|---|---|---|---|---|
+| 10 | 1 | 1 | +22% | +13% |
+| 100 | 1 | 1 | +2% | 0% |
+| 500 | 1 | 1 | 0% | +27% |
+| 10 | 8 | 1 | −3% | **−8%** (5-rep median) |
+| 100 | 8 | 1 | +10% | +19% |
+| 500 | 8 | 1 | 0% | **−5%** (5-rep median) |
+| 10 | 32 | 1 | +48% | +28% |
+| 100 | 32 | 1 | **+169%** (2,267 → 6,087) | **+162%** (1,303 → 3,413) |
+| 500 | 32 | 1 | **+183%** (2,350 → 6,652) | +91% |
+| 10 | 1 | 4 | −6% | −6% |
+| 100 | 1 | 4 | −1% | +7% |
+| 500 | 1 | 4 | −5% | −6% |
+| 10 | 8 | 4 | **+28%** (5-rep median; single sample was −24%) | +13% |
+| 100 | 8 | 4 | +66% | +52% |
+| 500 | 8 | 4 | +83% | +63% |
+| 10 | 32 | 4 | +126% | +12% |
+| 100 | 32 | 4 | +164% | +30% |
+| 500 | 32 | 4 | +152% | +50% |
+
+### Reading
+
+- **Large gains wherever acknowledgements contend:** concurrency 32, and several instances at concurrency 8. Up to about 2.8× on both providers.
+- **Concurrency 1 is unaffected.** Batches of one use the single-row statement, so the remaining ±6% differences are within noise.
+- **Honest residual:** a single SQL Server dispatcher at concurrency 8 measured a 5–8% lower median with batching. The ranges overlap the unbatched runs (for example, off 1,207–1,732 against on 1,437–1,526 msg/s). Batching stays on by default; set `DispatcherOptions.BatchAcknowledgements = false` if your measurements favour it.
+- **Rejected designs (measured):**
+
+  | Design | Result | Why |
+  |---|---|---|
+  | Background flusher thread | About −30% at concurrency 1 | The thread hop |
+  | Single leader | −11% to −40% on SQL Server at concurrency 8 | Acknowledgement round trips were serialised |
+  | XML/table-variable SQL Server statement | −54% to −65% | About 2.2 ms fixed cost per call; see ADR 0003 |

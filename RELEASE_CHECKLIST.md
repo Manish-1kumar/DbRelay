@@ -1,6 +1,6 @@
 # Release Checklist: 0.1.0 (release candidate)
 
-_Last updated: 2026-11-21 · Packages in this release: `DbRelay.Abstractions`, `DbRelay`, `DbRelay.PostgreSql`. `DbRelay.SqlServer` is built and
+_Last updated: 2026-11-22 · Packages in this release: `DbRelay.Abstractions`, `DbRelay`, `DbRelay.PostgreSql`. `DbRelay.SqlServer` is built and
 tested but not packed until 0.2.0 (project brief §15)._
 
 Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · ❌ not done · 🔒 requires owner approval
@@ -9,9 +9,9 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 
 | # | Criterion | Status | Evidence |
 |---|---|---|---|
-| 1 | Architecture documented | ✅ | `docs/architecture.md`, `docs/architecture-proposal.md`, ADR 0001–0002 |
+| 1 | Architecture documented | ✅ | `docs/architecture.md`, `docs/architecture-proposal.md`, ADR 0001–0003 |
 | 2 | Competitor analysis complete | ✅ | `docs/competitor-analysis.md` (sourced; key claims re-verified) |
-| 3 | Public APIs stable and documented | ✅ (pre-1.0) | XML docs on all public members (build enforces). Open decision before 1.0: SPI evolution (CR-24) |
+| 3 | Public APIs stable and documented | ✅ (pre-1.0) | XML docs on all public members (build enforces). SPI evolution decided (ADR 0003: optional capability interfaces) |
 | 4 | Core library builds | ✅ | `dotnet build DbRelay.slnx -c Release`: 0 warnings, 0 errors, 4 TFMs |
 | 5 | PostgreSQL persistence works | ✅ | 300/300 provider tests |
 | 6 | Transaction integration verified | ✅ | Conformance transaction tests (commit/rollback/ownership/validation) + integration atomicity (200 random commit/rollback) |
@@ -21,7 +21,7 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 | 10 | Dead-letter handling works | ✅ | Exhaustion, permanent failure, crash loop, requeue tests |
 | 11 | Multiple worker instances work safely | ✅ | 4 hosts × 2,000 messages, 0 duplicates; 8 concurrent claimers × 300, no double claim (both providers) |
 | 12 | Lease recovery works | ✅ | Conformance reclaim tests + process-kill test |
-| 13 | Crash scenarios tested | ✅ | Real child-process kill (redelivery after lease) and crash-loop → dead-letter |
+| 13 | Crash scenarios tested | ✅ | Real child-process kill (redelivery after lease) and crash-loop → dead-letter. Soak/chaos runs (`docs/soak/`): 3.5 h in total on both providers, 187 hard kills, 5,083 terminated sessions, 0 lost messages, PASS 9/9 each |
 | 14 | At-least-once documented | ✅ | README, `docs/reliability.md` (guarantee → test table) |
 | 15 | Security review complete | ✅ | `CODE_REVIEW_REPORT.md`: initial review, follow-up audit, and both resolution logs |
 | 16 | Performance benchmarks exist | ✅ | `docs/benchmarks.md` (BenchmarkDotNet + throughput sweep, environment recorded) |
@@ -47,9 +47,11 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 
 ## Engineering items carried to 0.2
 
-- **Storage SPI evolution (CR-24).** Decide between default interface members and an abstract base before adding members. Blocks the next two items.
-- **Batched acknowledgements.** The measured throughput bottleneck (`docs/benchmarks.md`).
-- **Batched release on shutdown (CR-08).**
+- ~~**Storage SPI evolution (CR-24).**~~ Done: optional capability interfaces (ADR 0003).
+- ~~**Batched acknowledgements.**~~ Done (ADR 0003, `docs/benchmarks.md` §3). It is in `[Unreleased]`, so 0.1.0 ships it if
+  it is tagged from the current `main`.
+- ~~**Batched release on shutdown (CR-08).**~~ Done.
+- **Batched-acknowledgement follow-ups:** a bounded leader hand-off (BA-05) and a SQL Server lock-behaviour stress test (BA-07).
 - **Single-statement multi-row insert on PostgreSQL.** Measured opportunity.
 - **Uniform `transaction: null` semantics (CR-11).**
 - **Aggregate enqueue size limits (CR-18).**

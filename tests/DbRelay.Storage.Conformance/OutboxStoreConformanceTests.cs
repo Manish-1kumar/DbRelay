@@ -519,6 +519,200 @@ public abstract class OutboxStoreConformanceTests : IAsyncLifetime
         Assert.NotNull(await Admin.GetAsync(array, Ct)); // admin reads tolerate the row too
     }
 
+    // ---- Optional capability: IOutboxBatchStore (ADR 0003) -----------------------------------------------------------
+
+    private IOutboxBatchStore RequireBatchStore()
+    {
+        RequireDatabase();
+        Assert.SkipUnless(Store is IOutboxBatchStore, "This provider does not implement the optional IOutboxBatchStore capability.");
+        return (IOutboxBatchStore)Store;
+    }
+
+    [Fact]
+    public async Task Batch_mark_delivered_updates_only_rows_that_still_hold_their_token()
+    {
+        var batch = RequireBatchStore();
+        for (var i = 0; i < 5; i++)
+        {
+            await EnqueueStandaloneAsync(new TestMessage($"b{i}"));
+        }
+
+        var token = Guid.NewGuid();
+        var claimed = await ClaimAsync(token: token);
+        Assert.Equal(5, claimed.Count);
+
+        // One message's lease expires and another worker takes it over.
+        var stolen = claimed[0].Id;
+        await ExpireAsync(Schema, stolen);
+        var newToken = Guid.NewGuid();
+        Assert.Equal(stolen, Assert.Single(await ClaimAsync(token: newToken)).Id);
+
+        var items = claimed.Select(m => new OutboxAcknowledgement(m.Id, token)).Append(new OutboxAcknowledgement(Guid.NewGuid(), token)).ToList();
+        var updated = await batch.MarkDeliveredBatchAsync(items, Ct);
+
+        Assert.Equal(claimed.Skip(1).Select(m => m.Id).OrderBy(i => i), updated.Select(a => a.MessageId).OrderBy(i => i)); // not the stolen one, not the unknown one
+        foreach (var message in claimed.Skip(1))
+        {
+            var row = await Admin.GetAsync(message.Id, Ct);
+            Assert.Equal(OutboxMessageStatus.Delivered, row!.Status);
+            Assert.NotNull(row.DeliveredAt);
+        }
+
+        var stolenRow = await Admin.GetAsync(stolen, Ct);
+        Assert.Equal(OutboxMessageStatus.Processing, stolenRow!.Status); // the new owner's lease is untouched
+        Assert.True(await Store.MarkDeliveredAsync(stolen, newToken, Ct));
+        Assert.Empty(await batch.MarkDeliveredBatchAsync(items, Ct)); // a repeated acknowledgement changes nothing
+    }
+
+    [Fact]
+    public async Task Batch_acknowledgements_check_each_rows_own_token()
+    {
+        var batch = RequireBatchStore();
+        var first = await EnqueueStandaloneAsync(new TestMessage("first"));
+        var firstToken = Guid.NewGuid();
+        Assert.Single(await ClaimAsync(batchSize: 1, token: firstToken));
+        var second = await EnqueueStandaloneAsync(new TestMessage("second"));
+        var secondToken = Guid.NewGuid();
+        Assert.Single(await ClaimAsync(batchSize: 1, token: secondToken));
+
+        // Mixed claims in one batch, plus a swapped token that must not match.
+        var updated = await batch.MarkDeliveredBatchAsync(
+            [new OutboxAcknowledgement(first, firstToken), new OutboxAcknowledgement(second, firstToken)], Ct);
+        Assert.Equal([new OutboxAcknowledgement(first, firstToken)], updated);
+        Assert.Equal(OutboxMessageStatus.Processing, (await Admin.GetAsync(second, Ct))!.Status);
+
+        Assert.Equal([new OutboxAcknowledgement(second, secondToken)], await batch.MarkDeliveredBatchAsync([new OutboxAcknowledgement(second, secondToken)], Ct));
+        Assert.Empty(await batch.MarkDeliveredBatchAsync([], Ct));
+    }
+
+    [Fact]
+    public async Task Batch_release_returns_messages_without_counting_the_attempt()
+    {
+        var batch = RequireBatchStore();
+        for (var i = 0; i < 3; i++)
+        {
+            await EnqueueStandaloneAsync(new TestMessage($"r{i}"));
+        }
+
+        var token = Guid.NewGuid();
+        var claimed = await ClaimAsync(token: token);
+        var released = await batch.ReleaseBatchAsync(
+            claimed.Select(m => new OutboxAcknowledgement(m.Id, token)).Append(new OutboxAcknowledgement(claimed[0].Id, Guid.NewGuid())).ToList(), Ct);
+
+        Assert.Equal(claimed.Select(m => m.Id).OrderBy(i => i), released.Select(a => a.MessageId).OrderBy(i => i));
+        foreach (var message in claimed)
+        {
+            var row = await Admin.GetAsync(message.Id, Ct);
+            Assert.Equal(OutboxMessageStatus.Pending, row!.Status);
+            Assert.Equal(0, row.AttemptCount);
+            Assert.Null(row.LockedBy);
+        }
+
+        Assert.Equal(3, (await ClaimAsync()).Count); // immediately claimable again
+    }
+
+    [Fact]
+    public async Task Batch_acknowledgements_handle_a_full_batch()
+    {
+        var batch = RequireBatchStore();
+        await using (var connection = await OpenConnectionAsync())
+        await using (var transaction = await connection.BeginTransactionAsync(Ct))
+        {
+            await Outbox.EnqueueManyAsync(transaction, Enumerable.Range(0, OutboxLimits.MaxClaimBatchSize).Select(i => new TestMessage($"f{i}")), Ct);
+            await transaction.CommitAsync(Ct);
+        }
+
+        var token = Guid.NewGuid();
+        var claimed = await ClaimAsync(batchSize: OutboxLimits.MaxClaimBatchSize, token: token);
+        Assert.Equal(OutboxLimits.MaxClaimBatchSize, claimed.Count);
+
+        var updated = await batch.MarkDeliveredBatchAsync(claimed.Select(m => new OutboxAcknowledgement(m.Id, token)).ToList(), Ct);
+
+        Assert.Equal(OutboxLimits.MaxClaimBatchSize, updated.Count);
+        Assert.Equal(OutboxLimits.MaxClaimBatchSize, (await Admin.GetStatisticsAsync(Ct)).Delivered);
+    }
+
+    [Fact]
+    public async Task Batch_release_never_touches_a_message_reclaimed_by_another_worker()
+    {
+        // BA-02: the guard on the batched release path. It is load-bearing for "insufficient lease time remaining", where another
+        // worker may already own the message. Removing the token predicate previously survived every suite.
+        var batch = RequireBatchStore();
+        var reclaimedId = await EnqueueStandaloneAsync(new TestMessage("reclaimed"));
+        var validId = await EnqueueStandaloneAsync(new TestMessage("valid"));
+        var staleToken = Guid.NewGuid();
+        Assert.Equal(2, (await ClaimAsync(token: staleToken)).Count);
+
+        await ExpireAsync(Schema, reclaimedId);
+        var ownerToken = Guid.NewGuid();
+        Assert.Equal(reclaimedId, Assert.Single(await ClaimAsync(token: ownerToken)).Id);
+        var ownedBefore = await Admin.GetAsync(reclaimedId, Ct);
+
+        var released = await batch.ReleaseBatchAsync(
+            [new OutboxAcknowledgement(reclaimedId, staleToken), new OutboxAcknowledgement(validId, staleToken)], Ct);
+
+        Assert.Equal([new OutboxAcknowledgement(validId, staleToken)], released);
+        var owned = await Admin.GetAsync(reclaimedId, Ct);
+        Assert.Equal(OutboxMessageStatus.Processing, owned!.Status);                 // still the new owner's
+        Assert.Equal(ownedBefore!.AttemptCount, owned.AttemptCount);                   // attempt not given back
+        Assert.Equal(ownedBefore.AvailableAt, owned.AvailableAt);                      // lease untouched
+        Assert.Equal(ownedBefore.LockedBy, owned.LockedBy);
+        Assert.True(await Store.MarkDeliveredAsync(reclaimedId, ownerToken, Ct));      // the owner's token still works
+        Assert.Equal(OutboxMessageStatus.Pending, (await Admin.GetAsync(validId, Ct))!.Status);
+    }
+
+    [Fact]
+    public async Task Batch_results_distinguish_a_stale_and_a_current_token_for_the_same_message()
+    {
+        // BA-03: results are (id, token) pairs, so a stale duplicate is never reported as recorded.
+        var batch = RequireBatchStore();
+        var id = await EnqueueStandaloneAsync(new TestMessage("dup"));
+        var staleToken = Guid.NewGuid();
+        Assert.Single(await ClaimAsync(token: staleToken));
+        await ExpireAsync(Schema, id);
+        var currentToken = Guid.NewGuid();
+        Assert.Single(await ClaimAsync(token: currentToken));
+        var other = await EnqueueStandaloneAsync(new TestMessage("other"));
+        var otherToken = Guid.NewGuid();
+        Assert.Single(await ClaimAsync(token: otherToken));
+
+        var updated = await batch.MarkDeliveredBatchAsync(
+            [new OutboxAcknowledgement(id, staleToken), new OutboxAcknowledgement(id, currentToken), new OutboxAcknowledgement(other, otherToken)], Ct);
+
+        Assert.Equal(2, updated.Count);
+        Assert.Contains(new OutboxAcknowledgement(id, currentToken), updated);
+        Assert.Contains(new OutboxAcknowledgement(other, otherToken), updated);
+        Assert.DoesNotContain(new OutboxAcknowledgement(id, staleToken), updated);
+    }
+
+    [Theory]
+    [InlineData(65)]   // SQL Server: one 64-item statement plus a one-item tail chunk (single-row path)
+    [InlineData(129)]  // two full chunks plus a one-item tail
+    [InlineData(100)]  // a full chunk plus a padded partial chunk
+    public async Task Batch_acknowledgements_handle_chunk_boundaries(int count)
+    {
+        var batch = RequireBatchStore();
+        await using (var connection = await OpenConnectionAsync())
+        await using (var transaction = await connection.BeginTransactionAsync(Ct))
+        {
+            await Outbox.EnqueueManyAsync(transaction, Enumerable.Range(0, count).Select(i => new TestMessage($"k{i}")), Ct);
+            await transaction.CommitAsync(Ct);
+        }
+
+        var token = Guid.NewGuid();
+        var claimed = await ClaimAsync(batchSize: count, token: token);
+        Assert.Equal(count, claimed.Count);
+        var stale = claimed[^1].Id; // make the very last item (the tail) stale
+        await ExpireAsync(Schema, stale);
+        Assert.Single(await ClaimAsync(token: Guid.NewGuid()));
+
+        var updated = await batch.MarkDeliveredBatchAsync(claimed.Select(m => new OutboxAcknowledgement(m.Id, token)).ToList(), Ct);
+
+        Assert.Equal(count - 1, updated.Count);
+        Assert.DoesNotContain(updated, a => a.MessageId == stale);
+        Assert.Equal(count - 1, (await Admin.GetStatisticsAsync(Ct)).Delivered);
+    }
+
     [Fact]
     public async Task Concurrent_claimers_never_receive_the_same_message()
     {

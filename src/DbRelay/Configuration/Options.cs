@@ -33,6 +33,14 @@ public sealed class DispatcherOptions
 
     /// <summary>A diagnostic identifier stored with claims. Defaults to <c>machine:process-id:random</c>. At most 256 characters.</summary>
     public string? WorkerId { get; set; }
+
+    /// <summary>
+    /// Whether "delivered" acknowledgements and shutdown releases are written in batches, when the storage provider supports it
+    /// (the built-in PostgreSQL and SQL Server providers do). Defaults to <see langword="true"/>. Batching adds no latency: a lone
+    /// acknowledgement is written immediately, and acknowledgements that arrive during a round trip share the next one. Every row
+    /// is still guarded by its own lock token.
+    /// </summary>
+    public bool BatchAcknowledgements { get; set; } = true;
 }
 
 /// <summary>Retry options.</summary>

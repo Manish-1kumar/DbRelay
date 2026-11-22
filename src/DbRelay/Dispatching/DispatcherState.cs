@@ -46,10 +46,16 @@ internal sealed class DispatcherState
         }
     }
 
-    /// <summary>The number of abandoned handlers (CR-05) that are still running. Read by the health check and a gauge.</summary>
+    /// <summary>
+    /// The number of abandoned handlers (CR-05) that are still running. This is the single source of truth, read by the dispatcher's
+    /// FU-02 limit, the health check and a gauge. It is updated only with atomic increment/decrement: copying a separately
+    /// maintained counter in here would let a stale last write win, leaving the count, and Degraded health, stuck.
+    /// </summary>
     public int AbandonedHandlers => Volatile.Read(ref _abandonedHandlers);
 
-    public void SetAbandonedHandlers(int count) => Volatile.Write(ref _abandonedHandlers, count);
+    public void AbandonedHandlerStarted() => Interlocked.Increment(ref _abandonedHandlers);
+
+    public void AbandonedHandlerFinished() => Interlocked.Decrement(ref _abandonedHandlers);
 
     public int PollFailed(Exception exception)
     {

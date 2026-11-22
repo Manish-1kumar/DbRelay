@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
@@ -9,8 +10,54 @@ namespace DbRelay.Tests.Fakes;
 /// An in-memory <see cref="IOutboxStore"/> following the SPI semantics (lock-token guards, lease visibility), with failure injection.
 /// Used to unit-test the dispatcher without a database. It does not model transactions.
 /// </summary>
-public sealed class InMemoryOutboxStore : IOutboxStore
+public sealed class InMemoryOutboxStore : IOutboxStore, IOutboxBatchStore
 {
+    /// <summary>Number of batched "delivered" calls and their sizes (ADR 0003), for asserting that batching happens.</summary>
+    public ConcurrentQueue<int> DeliveredBatchSizes { get; } = new();
+
+    /// <summary>When set, batched releases throw (to test the dispatcher's per-message fallback).</summary>
+    public bool FailBatchRelease { get; set; }
+
+    public int BatchReleaseCalls => Volatile.Read(ref _batchReleaseCalls);
+
+    private int _batchReleaseCalls;
+
+    /// <summary>Batched operations reuse the single-item path, so every failure-injection hook applies to them too.</summary>
+    public async Task<IReadOnlyCollection<OutboxAcknowledgement>> MarkDeliveredBatchAsync(IReadOnlyList<OutboxAcknowledgement> items, CancellationToken cancellationToken)
+    {
+        DeliveredBatchSizes.Enqueue(items.Count);
+        var updated = new HashSet<OutboxAcknowledgement>();
+        foreach (var item in items)
+        {
+            if (await MarkDeliveredCoreAsync(item.MessageId, item.LockToken))
+            {
+                updated.Add(item);
+            }
+        }
+
+        return updated;
+    }
+
+    public async Task<IReadOnlyCollection<OutboxAcknowledgement>> ReleaseBatchAsync(IReadOnlyList<OutboxAcknowledgement> items, CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref _batchReleaseCalls);
+        if (FailBatchRelease)
+        {
+            throw new TimeoutException("simulated batch release failure");
+        }
+
+        var released = new HashSet<OutboxAcknowledgement>();
+        foreach (var item in items)
+        {
+            if (await ReleaseAsync(item.MessageId, item.LockToken, cancellationToken))
+            {
+                released.Add(item);
+            }
+        }
+
+        return released;
+    }
+
     private readonly object _gate = new();
     private readonly Dictionary<Guid, Row> _rows = [];
     private readonly TimeProvider _time;
@@ -138,7 +185,20 @@ public sealed class InMemoryOutboxStore : IOutboxStore
         }
     }
 
-    public Task<bool> MarkDeliveredAsync(Guid messageId, Guid lockToken, CancellationToken cancellationToken) =>
+    /// <summary>Awaited before every single-row "delivered" update, to hold a flush open in tests.</summary>
+    public Func<Task>? BeforeSingleDelivered { get; set; }
+
+    public async Task<bool> MarkDeliveredAsync(Guid messageId, Guid lockToken, CancellationToken cancellationToken)
+    {
+        if (BeforeSingleDelivered is { } hook)
+        {
+            await hook();
+        }
+
+        return await MarkDeliveredCoreAsync(messageId, lockToken);
+    }
+
+    private Task<bool> MarkDeliveredCoreAsync(Guid messageId, Guid lockToken) =>
         Update(messageId, lockToken, "delivered", (row, now) =>
         {
             row.Status = OutboxMessageStatus.Delivered;

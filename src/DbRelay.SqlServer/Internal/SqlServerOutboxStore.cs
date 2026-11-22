@@ -7,7 +7,7 @@ using Microsoft.Data.SqlClient;
 namespace DbRelay.SqlServer.Internal;
 
 /// <summary>The SQL Server <see cref="IOutboxStore"/>.</summary>
-internal sealed class SqlServerOutboxStore : IOutboxStore
+internal sealed class SqlServerOutboxStore : IOutboxStore, IOutboxBatchStore
 {
     /// <summary>Upper bound for intervals so <c>seconds</c> always fits DATEADD's <c>int</c> (about 54 years).</summary>
     private static readonly TimeSpan MaxInterval = TimeSpan.FromDays(20000);
@@ -217,6 +217,76 @@ internal sealed class SqlServerOutboxStore : IOutboxStore
             },
             cancellationToken).ConfigureAwait(false);
         return rows == 1;
+    }
+
+    public Task<IReadOnlyCollection<OutboxAcknowledgement>> MarkDeliveredBatchAsync(IReadOnlyList<OutboxAcknowledgement> items, CancellationToken cancellationToken) =>
+        GuardedBatchAsync(items, _sql.GetMarkDeliveredBatch, (id, token, ct) => MarkDeliveredAsync(id, token, ct), cancellationToken);
+
+    public Task<IReadOnlyCollection<OutboxAcknowledgement>> ReleaseBatchAsync(IReadOnlyList<OutboxAcknowledgement> items, CancellationToken cancellationToken) =>
+        GuardedBatchAsync(items, _sql.GetReleaseBatch, (id, token, ct) => ReleaseAsync(id, token, ct), cancellationToken);
+
+    private async Task<IReadOnlyCollection<OutboxAcknowledgement>> GuardedBatchAsync(
+        IReadOnlyList<OutboxAcknowledgement> items,
+        Func<int, string> statementForBucket,
+        Func<Guid, Guid, CancellationToken, Task<bool>> single,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        if (items.Count > OutboxLimits.MaxClaimBatchSize)
+        {
+            throw new ArgumentOutOfRangeException(nameof(items), items.Count, $"At most {OutboxLimits.MaxClaimBatchSize} items per batch.");
+        }
+
+        var updated = new HashSet<OutboxAcknowledgement>();
+        for (var offset = 0; offset < items.Count; offset += SqlServerOutboxSql.MaxBatchStatementItems)
+        {
+            var count = Math.Min(SqlServerOutboxSql.MaxBatchStatementItems, items.Count - offset);
+            if (count == 1)
+            {
+                // A one-item chunk takes the cheaper single-row statement.
+                if (await single(items[offset].MessageId, items[offset].LockToken, cancellationToken).ConfigureAwait(false))
+                {
+                    updated.Add(items[offset]);
+                }
+
+                continue;
+            }
+
+            var bucket = SqlServerOutboxSql.BucketFor(count);
+            var start = offset;
+            // Results are collected per attempt and merged only when the attempt succeeds: a deadlock-victim attempt is rolled back,
+            // so nothing it output may count (BA-08).
+            var chunkResult = await _connections.ExecuteAsync<List<OutboxAcknowledgement>>(
+                async (connection, ct) =>
+                {
+                    var attemptResult = new List<OutboxAcknowledgement>(count);
+                    var command = _connections.CreateCommand(connection, statementForBucket(bucket));
+                    await using (command.ConfigureAwait(false))
+                    {
+                        for (var i = 0; i < bucket; i++)
+                        {
+                            var item = items[start + Math.Min(i, count - 1)]; // pad by repeating the last item
+                            Add(command.Parameters, $"@i{i}", SqlDbType.UniqueIdentifier, 0, item.MessageId);
+                            Add(command.Parameters, $"@t{i}", SqlDbType.UniqueIdentifier, 0, item.LockToken);
+                        }
+
+                        var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                        await using (reader.ConfigureAwait(false))
+                        {
+                            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                            {
+                                attemptResult.Add(new OutboxAcknowledgement(reader.GetGuid(0), reader.GetGuid(1)));
+                            }
+                        }
+
+                        return attemptResult;
+                    }
+                },
+                cancellationToken).ConfigureAwait(false);
+            updated.UnionWith(chunkResult);
+        }
+
+        return updated;
     }
 
     // ---- Maintenance and administration ------------------------------------------------------------------------------

@@ -345,3 +345,26 @@ The integration suite was also run twice back-to-back on all TFMs after the last
 - **Unreadable rows:** placeholder dead-lettering.
 
 **Mutation checks (fix reverted temporarily, new test confirmed failing, fix restored):** FU-01 on SQL Server (RCSI off and on) and FU-04.
+
+### Run after batched acknowledgements, the BA review fixes and the soak runs (2026-11-22)
+
+| Project | Per TFM | Total (4 TFMs) | Failed | Skipped |
+|---|---|---|---|---|
+| DbRelay.Tests | 104 | **416** | 0 | 0 |
+| DbRelay.PostgreSql.Tests | 84 | **336** | 0 | 0 |
+| DbRelay.SqlServer.Tests (RCSI off and on) | 113 | **452** | 0 | 0 |
+| DbRelay.IntegrationTests | 19 | **76** | 0 | 0 |
+| **All** | | **1,280** | **0** | **0** |
+
+The build had 0 warnings, and `dotnet format --verify-no-changes` was clean.
+
+**Soak and chaos runs** (`docs/soak/`): PostgreSQL 2 h, SQL Server 1 h, and PostgreSQL 30 min on the final code.
+- **Result:** every run passed all 9 invariants: atomicity, completeness, poison messages dead-lettered, a full drain, bounded attempts, and every Delivered row reaching the sink.
+- **Messages:** 518,026 committed in total, 0 lost and 0 orphaned.
+- **Chaos:** 187 hard worker kills, 100 graceful stops and 5,083 terminated database sessions.
+- **Duplicates:** 7 in total, which at-least-once delivery allows.
+- **Resources:** the long-lived worker's memory, threads and handles stayed flat.
+
+The 2-hour PostgreSQL run used the build from before the BA review fixes; the other two used the final code.
+
+**Mutation checks:** for the BA-02 release token guard (both providers) and the batcher lost-wake-up race, the fix was reverted temporarily, the new test was confirmed failing, and the fix was restored.

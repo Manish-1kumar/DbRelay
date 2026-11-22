@@ -105,6 +105,20 @@ internal sealed class SqlServerOutboxSql
         Release = Guarded(
             "[status] = 0, [available_at] = @_now, [attempt_count] = CASE WHEN [attempt_count] > 0 THEN [attempt_count] - 1 ELSE 0 END, [lock_token] = NULL, [locked_by] = NULL");
 
+        // ADR 0003 batch variants: a parameterized VALUES list joined on (id, lock_token), so each row stays guarded by its own token
+        // and only changed rows are output. Measured on SQL Server 2022 (20,000-row table), per call:
+        //   single-row UPDATE 88 us; XML + table variable 2,268 us for 1 item (rejected: fixed overhead made batching slower);
+        //   VALUES 8 items 339 us; VALUES 64 items 13,523 us without FORCESEEK (scan) but 1,117 us with it.
+        // Statements are generated for power-of-two bucket sizes up to 64 (6 cached plans per operation). Smaller batches are
+        // padded by repeating the last item, which is harmless: a duplicate join row updates and outputs the target once.
+        foreach (var bucket in BatchBuckets)
+        {
+            _markDeliveredBatch[bucket] = GuardedBatch("[status] = 2, [delivered_at] = @_now, [lock_token] = NULL", bucket);
+            _releaseBatch[bucket] = GuardedBatch(
+                "[status] = 0, [available_at] = @_now, [attempt_count] = CASE WHEN m.[attempt_count] > 0 THEN m.[attempt_count] - 1 ELSE 0 END, [lock_token] = NULL, [locked_by] = NULL",
+                bucket);
+        }
+
         DeleteDelivered =
             "SET NOCOUNT ON;\n" + Now +
             "WITH [expired] AS (\n" +
@@ -158,6 +172,32 @@ internal sealed class SqlServerOutboxSql
     public string MarkDeadLettered { get; }
 
     public string Release { get; }
+
+    /// <summary>The largest number of items in one batch statement; larger batches are split into chunks.</summary>
+    internal const int MaxBatchStatementItems = 64;
+
+    private static readonly int[] BatchBuckets = [2, 4, 8, 16, 32, MaxBatchStatementItems];
+
+    private readonly Dictionary<int, string> _markDeliveredBatch = [];
+    private readonly Dictionary<int, string> _releaseBatch = [];
+
+    /// <summary>The smallest bucket size that holds <paramref name="count"/> items (2 to 64).</summary>
+    internal static int BucketFor(int count)
+    {
+        foreach (var bucket in BatchBuckets)
+        {
+            if (bucket >= count)
+            {
+                return bucket;
+            }
+        }
+
+        throw new ArgumentOutOfRangeException(nameof(count), count, $"At most {MaxBatchStatementItems} items per batch statement.");
+    }
+
+    public string GetMarkDeliveredBatch(int bucket) => _markDeliveredBatch[bucket];
+
+    public string GetReleaseBatch(int bucket) => _releaseBatch[bucket];
 
     public string DeleteDelivered { get; }
 
@@ -251,6 +291,15 @@ internal sealed class SqlServerOutboxSql
         $"UPDATE {QualifiedTable} SET {assignments}\n" +
         "WHERE [id] = @id AND [lock_token] = @lock_token AND [status] = 1;\n" +
         "SELECT @@ROWCOUNT;";
+
+    private string GuardedBatch(string assignments, int items) =>
+        "SET NOCOUNT ON;\n" + Now +
+        $"UPDATE m SET {assignments}\n" +
+        "OUTPUT inserted.[id], deleted.[lock_token]\n" +
+        $"FROM {QualifiedTable} AS m WITH (ROWLOCK, FORCESEEK)\n" +
+        "INNER JOIN (VALUES " + string.Join(", ", Enumerable.Range(0, items).Select(i => $"(@i{i}, @t{i})")) + ") AS a([id], [token])\n" +
+        "    ON a.[id] = m.[id] AND m.[lock_token] = a.[token]\n" +
+        "WHERE m.[status] = 1;";
 
     private string BulkRequeue(bool typeFilter) =>
         "SET NOCOUNT ON;\n" +

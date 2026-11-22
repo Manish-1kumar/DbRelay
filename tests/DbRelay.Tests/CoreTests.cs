@@ -391,6 +391,23 @@ public class DispatcherStateTests
     }
 }
 
+public class AbandonedHandlerCounterTests
+{
+    [Fact]
+    public void Concurrent_start_and_finish_never_leaves_a_stale_count()
+    {
+        // Regression: the count used to be copied with a separate write after an atomic update, so a stale write could win and
+        // leave the health check Degraded forever.
+        var state = new DbRelay.Dispatching.DispatcherState();
+        Parallel.For(0, 200_000, new ParallelOptions { MaxDegreeOfParallelism = 8 }, _ =>
+        {
+            state.AbandonedHandlerStarted();
+            state.AbandonedHandlerFinished();
+        });
+        Assert.Equal(0, state.AbandonedHandlers);
+    }
+}
+
 public class DeliveryResultTests
 {
     [Fact]

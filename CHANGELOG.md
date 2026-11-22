@@ -7,6 +7,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Batched acknowledgements** (ADR 0003). "Delivered" outcomes and shutdown releases are written in group-commit batches when
+  the storage provider supports it; both built-in providers do. Batching adds no latency: a lone acknowledgement is written
+  immediately with the single-row statement. Every row is still guarded by its own lock token. It is on by default and can be
+  turned off with `DispatcherOptions.BatchAcknowledgements`. Measured gains are in `docs/benchmarks.md`.
+- **New storage SPI capability `IOutboxBatchStore`** with `OutboxAcknowledgement`. This is an optional interface, so existing
+  `IOutboxStore` implementations keep working unchanged.
+- **New metric `dbrelay.ack.batch_size`.**
+- **Soak/chaos harness `tests/DbRelay.Soak`.** Producers with rollbacks, worker-process kills and graceful stops, database session
+  kills, unreliable handlers, and invariant verification after a drain.
+
+### Fixed
+
+- The abandoned-handler count, used by the health check and the gauge, could be left permanently stale by a race. It is now a
+  single atomic counter.
+
 ## [0.1.0] - Unreleased
 
 First release.

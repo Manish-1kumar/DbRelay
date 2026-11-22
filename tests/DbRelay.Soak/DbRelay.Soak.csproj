@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Long-running soak / chaos harness (not a test project; not run by CI). See Program.cs for usage.
+    Requires DBRELAY_TEST_POSTGRES or DBRELAY_TEST_SQLSERVER.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <IsTestProject>false</IsTestProject>
+    <NoWarn>$(NoWarn);CA1303;CA1031;CA2007;CA1515;CA5394;CA1812;CA2000</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Using Remove="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DbRelay.PostgreSql\DbRelay.PostgreSql.csproj" />
+    <ProjectReference Include="..\..\src\DbRelay.SqlServer\DbRelay.SqlServer.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Dapper" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+
+</Project>
