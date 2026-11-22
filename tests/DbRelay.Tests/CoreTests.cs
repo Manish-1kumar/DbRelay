@@ -497,6 +497,32 @@ public sealed class OutboxValidationTests : IDisposable
     }
 
     [Fact]
+    public async Task EnqueueMany_rejects_a_call_whose_payloads_exceed_the_budget_before_writing_anything()
+    {
+        // CR-18 / ADR 0004: one call may carry at most max(64 MiB, MaxPayloadBytes) of serialized payloads.
+        var store = new InMemoryOutboxStore();
+        var services = new ServiceCollection();
+        services.AddDbRelay(relay => relay.UseStorage(_ => store).DisableDispatcher().Configure(o => o.MaxPayloadBytes = 1024 * 1024));
+        await using var provider = services.BuildServiceProvider();
+        var outbox = provider.GetRequiredService<IOutbox>();
+        using var connection = new FakeConnection();
+
+        var transaction = connection.BeginTransaction();
+        var text = new string('x', 700 * 1024); // about 700 KB serialized; 100 of them exceed 64 MiB
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() =>
+            outbox.EnqueueManyAsync(transaction, Enumerable.Range(0, 100).Select(_ => new Mapped2(text)), Ct));
+        Assert.Contains("EnqueueManyAsync", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(0, store.CountByStatus().Values.Sum());
+
+        // Under the budget: accepted.
+        var ids = await outbox.EnqueueManyAsync(transaction, Enumerable.Range(0, 80).Select(_ => new Mapped2(text)), Ct);
+        Assert.Equal(80, ids.Count);
+    }
+
+    [OutboxMessageType("big")]
+    private sealed record Mapped2(string Text);
+
+    [Fact]
     public async Task Enqueue_returns_a_uuid7_and_stores_mapped_type()
     {
         var transaction = _connection.BeginTransaction();

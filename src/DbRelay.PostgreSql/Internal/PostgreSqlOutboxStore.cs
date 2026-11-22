@@ -69,6 +69,7 @@ internal sealed class PostgreSqlOutboxStore : IOutboxStore, IOutboxBatchStore
     public async Task<IReadOnlyList<OutboxMessageDetails>> ClaimAsync(ClaimRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ArgumentOutOfRangeException.ThrowIfLessThan(request.MaxPayloadBytes, 1L, nameof(request));
         var command = CreateCommand(_settings.ClaimSql);
         await using (command.ConfigureAwait(false))
         {
@@ -76,6 +77,7 @@ internal sealed class PostgreSqlOutboxStore : IOutboxStore, IOutboxBatchStore
             command.Parameters.Add(new NpgsqlParameter<Guid> { TypedValue = request.LockToken, NpgsqlDbType = NpgsqlDbType.Uuid });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = request.WorkerId, NpgsqlDbType = NpgsqlDbType.Text });
             command.Parameters.Add(Interval(request.LeaseDuration));
+            command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = request.MaxPayloadBytes, NpgsqlDbType = NpgsqlDbType.Bigint });
             return await ReadDetailsListAsync(command, request.BatchSize, cancellationToken).ConfigureAwait(false);
         }
     }

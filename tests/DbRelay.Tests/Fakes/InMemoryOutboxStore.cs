@@ -167,6 +167,17 @@ public sealed class InMemoryOutboxStore : IOutboxStore, IOutboxBatchStore
                 .OrderBy(r => r.AvailableAt)
                 .Take(request.BatchSize)
                 .ToList();
+
+            // CR-18 payload budget: keep a row only if the payloads before it total less than the budget.
+            long before = 0;
+            var kept = 0;
+            while (kept < claimed.Count && before < request.MaxPayloadBytes)
+            {
+                before += claimed[kept].Record.Payload.Length;
+                kept++;
+            }
+
+            claimed.RemoveRange(kept, claimed.Count - kept);
             foreach (var row in claimed)
             {
                 row.Status = OutboxMessageStatus.Processing;

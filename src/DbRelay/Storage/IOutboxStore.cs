@@ -44,6 +44,9 @@ public interface IOutboxStore
     /// <c>available_at</c> is at or before the database's current time, oldest <c>available_at</c> first, skipping rows locked by
     /// concurrent claimers. Each claimed row gets status Processing, the request's lock token and worker ID,
     /// <c>attempt_count + 1</c>, <c>last_attempt_at = now</c> and <c>available_at = now + lease</c>.
+    /// The batch is also limited by <see cref="ClaimRequest.MaxPayloadBytes"/>: in claim order, a message is included only if the
+    /// payloads of the messages before it total less than that budget (so the first message is always included). Messages cut by
+    /// the budget must be left untouched.
     /// </summary>
     /// <param name="request">The claim parameters.</param>
     /// <param name="cancellationToken">Cancels the claim.</param>

@@ -312,7 +312,7 @@ public sealed class PostgreSqlProviderTests(PostgreSqlFixture fixture)
             var settings = PostgreSqlSettings.Create(pg => pg.Schema = schema);
             var plans = new Dictionary<string, string>
             {
-                ["claim"] = await ExplainAsync(settings.ClaimSql, 100, Guid.NewGuid(), "explain-worker", TimeSpan.FromMinutes(2)),
+                ["claim"] = await ExplainAsync(settings.ClaimSql, 100, Guid.NewGuid(), "explain-worker", TimeSpan.FromMinutes(2), (long)OutboxLimits.BatchPayloadBudgetBytes),
                 ["delete-delivered"] = await ExplainAsync(settings.DeleteDeliveredSql, TimeSpan.FromDays(7), 1000),
                 ["requeue-dead-lettered"] = await ExplainAsync(settings.RequeueDeadLetteredSql, 100),
             };
@@ -372,7 +372,7 @@ public sealed class PostgreSqlProviderTests(PostgreSqlFixture fixture)
 
             var plans = new Dictionary<string, string>
             {
-                ["claim"] = await ExplainAsync(settings.ClaimSql, disableSeqScan: false, 100, Guid.NewGuid(), "explain-worker", TimeSpan.FromMinutes(2)),
+                ["claim"] = await ExplainAsync(settings.ClaimSql, disableSeqScan: false, 100, Guid.NewGuid(), "explain-worker", TimeSpan.FromMinutes(2), (long)OutboxLimits.BatchPayloadBudgetBytes),
                 ["delete-delivered"] = await ExplainAsync(settings.DeleteDeliveredSql, disableSeqScan: false, TimeSpan.FromDays(7), 1000),
                 ["requeue-dead-lettered"] = await ExplainAsync(settings.RequeueDeadLetteredSql, disableSeqScan: false, 100),
                 ["statistics"] = await ExplainAsync(settings.StatisticsSql, disableSeqScan: false),

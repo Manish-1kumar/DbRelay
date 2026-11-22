@@ -262,6 +262,7 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture) : IAsyncLif
             command.Parameters.AddWithValue("@lock_token", Guid.NewGuid());
             command.Parameters.AddWithValue("@worker_id", "holder");
             command.Parameters.AddWithValue("@lease_ms", 60000L);
+            command.Parameters.AddWithValue("@max_payload_bytes", (long)OutboxLimits.BatchPayloadBudgetBytes);
             await using var reader = await command.ExecuteReaderAsync(Ct);
             while (await reader.ReadAsync(Ct))
             {
@@ -329,6 +330,7 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture) : IAsyncLif
             cmd.Parameters.Add(new SqlParameter("@lock_token", System.Data.SqlDbType.UniqueIdentifier) { Value = Guid.NewGuid() });
             cmd.Parameters.Add(new SqlParameter("@worker_id", System.Data.SqlDbType.NVarChar, 256) { Value = "plan" });
             cmd.Parameters.Add(new SqlParameter("@lease_ms", System.Data.SqlDbType.BigInt) { Value = 60000L });
+            cmd.Parameters.Add(new SqlParameter("@max_payload_bytes", System.Data.SqlDbType.BigInt) { Value = (long)OutboxLimits.BatchPayloadBudgetBytes });
         });
 
         var cleanup = await CaptureActualPlanAsync(connection, "delete-delivered", sql.DeleteDelivered, report, cmd =>

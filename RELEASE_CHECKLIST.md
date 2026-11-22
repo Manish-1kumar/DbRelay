@@ -9,7 +9,7 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 
 | # | Criterion | Status | Evidence |
 |---|---|---|---|
-| 1 | Architecture documented | ✅ | `docs/architecture.md`, `docs/architecture-proposal.md`, ADR 0001–0003 |
+| 1 | Architecture documented | ✅ | `docs/architecture.md`, `docs/architecture-proposal.md`, ADR 0001–0004 |
 | 2 | Competitor analysis complete | ✅ | `docs/competitor-analysis.md` (sourced; key claims re-verified) |
 | 3 | Public APIs stable and documented | ✅ (pre-1.0) | XML docs on all public members (build enforces). SPI evolution decided (ADR 0003: optional capability interfaces) |
 | 4 | Core library builds | ✅ | `dotnet build DbRelay.slnx -c Release`: 0 warnings, 0 errors, 4 TFMs |
@@ -55,7 +55,7 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 - **Batched-acknowledgement follow-ups:** a bounded leader hand-off (BA-05) and a SQL Server lock-behaviour stress test (BA-07).
 - **Single-statement multi-row insert on PostgreSQL.** Measured opportunity.
 - **Uniform `transaction: null` semantics (CR-11).**
-- **Aggregate enqueue size limits (CR-18).**
+- ~~**Aggregate enqueue size limits (CR-18).**~~ Done (ADR 0004): 64 MiB per enqueue call and per claim.
 - ~~**`created_at` index for admin queries (CR-21).**~~ Resolved without an index (it measured +25-28% insert cost). PostgreSQL admin paging now sorts only the narrow keys, as SQL Server does, and `Skip` is capped at 10,000. See `docs/troubleshooting.md`.
 - ~~**Automated PostgreSQL large-table plan assertion (T-03).**~~ Done: `Planner_chooses_the_partial_indexes_on_a_realistic_table` (100k rows, no `enable_seqscan` override; mutation-checked against the pre-CR-03 statistics query).
 - ~~**Test fixtures that sweep orphaned `t_*` schemas left by killed test processes.**~~ Done (K13).

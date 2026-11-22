@@ -22,6 +22,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - `DbRelay.PostgreSql` now depends on Npgsql 10.0.4 (was 10.0.3).
+- **Payload budgets** (CR-18, ADR 0004).
+  - `EnqueueManyAsync` rejects a call whose serialized payloads total more than 64 MiB, or more than `MaxPayloadBytes` if that
+    is larger.
+  - A claim stops adding messages once their payloads reach 64 MiB; the first message is always claimed. New
+    `OutboxLimits.BatchPayloadBudgetBytes` and init-only `ClaimRequest.MaxPayloadBytes`; custom stores keep compiling, and
+    the conformance suite checks the rule.
 - **`OutboxQuery.Skip` is limited to 10,000** (CR-21); larger values throw `ArgumentOutOfRangeException`. Narrow the query
   with filters instead of paging deeper.
 - PostgreSQL admin queries sort only `(created_at, id)` and then fetch the page's rows, as the SQL Server provider does. On a

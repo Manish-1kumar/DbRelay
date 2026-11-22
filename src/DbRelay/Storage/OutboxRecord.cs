@@ -47,7 +47,16 @@ public sealed class OutboxRecord
 /// <param name="LeaseDuration">How long the claim is valid, measured from the database's current time.</param>
 /// <param name="LockToken">A new, unique token identifying this claim.</param>
 /// <param name="WorkerId">A diagnostic worker identifier (at most <see cref="OutboxLimits.MaxWorkerIdLength"/> characters).</param>
-public sealed record ClaimRequest(int BatchSize, TimeSpan LeaseDuration, Guid LockToken, string WorkerId);
+public sealed record ClaimRequest(int BatchSize, TimeSpan LeaseDuration, Guid LockToken, string WorkerId)
+{
+    /// <summary>
+    /// The payload budget of the claim, in bytes (at least 1). Defaults to <see cref="OutboxLimits.BatchPayloadBudgetBytes"/>.
+    /// Messages are taken in claim order until their payloads reach this total: a message is claimed only if the payloads of
+    /// the messages before it in the batch total less than this value, so the first message is always claimed however large it
+    /// is. This bounds the memory one claim can load (review finding CR-18, ADR 0004).
+    /// </summary>
+    public long MaxPayloadBytes { get; init; } = OutboxLimits.BatchPayloadBudgetBytes;
+}
 
 /// <summary>Size limits shared by validation and storage providers (column sizes).</summary>
 public static class OutboxLimits
@@ -84,4 +93,11 @@ public static class OutboxLimits
 
     /// <summary>Maximum number of messages in one claim.</summary>
     public const int MaxClaimBatchSize = 1000;
+
+    /// <summary>
+    /// The payload bytes allowed in one enqueue call or one claim (64 MiB), unless a single message is larger (CR-18, ADR 0004).
+    /// An enqueue call may carry up to this many bytes or <c>OutboxOptions.MaxPayloadBytes</c>, whichever is larger. A claim
+    /// stops adding messages once their payloads reach this total (see <see cref="ClaimRequest.MaxPayloadBytes"/>).
+    /// </summary>
+    public const int BatchPayloadBudgetBytes = 64 * 1024 * 1024;
 }

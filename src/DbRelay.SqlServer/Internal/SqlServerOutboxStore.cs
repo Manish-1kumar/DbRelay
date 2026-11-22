@@ -143,6 +143,7 @@ internal sealed class SqlServerOutboxStore : IOutboxStore, IOutboxBatchStore
             throw new ArgumentOutOfRangeException(nameof(request), request.BatchSize, $"ClaimRequest.BatchSize must be between 1 and {OutboxLimits.MaxClaimBatchSize}.");
         }
 
+        ArgumentOutOfRangeException.ThrowIfLessThan(request.MaxPayloadBytes, 1L, nameof(request));
         return _connections.ExecuteAsync<IReadOnlyList<OutboxMessageDetails>>(
             async (connection, ct) =>
             {
@@ -153,7 +154,7 @@ internal sealed class SqlServerOutboxStore : IOutboxStore, IOutboxBatchStore
                     Add(command.Parameters, "@lock_token", SqlDbType.UniqueIdentifier, 0, request.LockToken);
                     Add(command.Parameters, "@worker_id", SqlDbType.NVarChar, OutboxLimits.MaxWorkerIdLength, Truncate(request.WorkerId, OutboxLimits.MaxWorkerIdLength));
                     Add(command.Parameters, "@lease_ms", SqlDbType.BigInt, 0, ToMilliseconds(request.LeaseDuration));
-
+                    Add(command.Parameters, "@max_payload_bytes", SqlDbType.BigInt, 0, request.MaxPayloadBytes);
                     var claimed = new List<(DateTime PreviousAvailableAt, long Sequence, OutboxMessageDetails Message)>(request.BatchSize);
                     var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
                     await using (reader.ConfigureAwait(false))

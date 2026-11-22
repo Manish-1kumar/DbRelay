@@ -27,6 +27,7 @@ internal sealed class Outbox : IOutbox
     private readonly DbRelayMetrics _metrics;
     private readonly TimeProvider _time;
     private readonly int _maxPayloadBytes;
+    private readonly long _maxCallPayloadBytes;
 
     public Outbox(
         IOutboxStore store,
@@ -42,6 +43,7 @@ internal sealed class Outbox : IOutbox
         _metrics = metrics;
         _time = time;
         _maxPayloadBytes = options.Value.MaxPayloadBytes;
+        _maxCallPayloadBytes = Math.Max(OutboxLimits.BatchPayloadBudgetBytes, _maxPayloadBytes);
 
         // A custom serializer's content type is stored in a bounded column; reject bad values up front rather than letting a
         // provider truncate them silently (CR-12).
@@ -85,6 +87,7 @@ internal sealed class Outbox : IOutbox
         }
 
         var records = new List<OutboxRecord>();
+        long payloadBytes = 0;
         foreach (var message in messages)
         {
             if (records.Count == OutboxLimits.MaxEnqueueBatchSize)
@@ -92,7 +95,18 @@ internal sealed class Outbox : IOutbox
                 throw new ArgumentException($"At most {OutboxLimits.MaxEnqueueBatchSize} messages can be enqueued in one call.", nameof(messages));
             }
 
-            records.Add(CreateRecord(message, options, allowMessageId: false));
+            var record = CreateRecord(message, options, allowMessageId: false);
+            payloadBytes += record.Payload.Length;
+            if (payloadBytes > _maxCallPayloadBytes)
+            {
+                // CR-18: bound the memory and request size of one call; checked while serializing, so it fails early.
+                throw new ArgumentException(
+                    $"The serialized payloads of one EnqueueManyAsync call may total at most {_maxCallPayloadBytes} bytes " +
+                    $"(the larger of {OutboxLimits.BatchPayloadBudgetBytes} and OutboxOptions.MaxPayloadBytes). Split the messages into several calls in the same transaction.",
+                    nameof(messages));
+            }
+
+            records.Add(record);
         }
 
         if (records.Count == 0)

@@ -412,6 +412,37 @@ public abstract class OutboxStoreConformanceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Claim_stops_at_the_payload_budget_but_always_takes_the_first_message()
+    {
+        // CR-18 / ADR 0004: a message is claimed only if the payloads before it in the batch total less than the budget.
+        RequireDatabase();
+        var ids = new List<Guid>();
+        for (var i = 0; i < 6; i++)
+        {
+            ids.Add(await EnqueueStandaloneAsync(new TestMessage(new string('x', 280) + i)));
+        }
+
+        var size = (await Admin.GetAsync(ids[0], Ct))!.Payload.Length;
+
+        // Budget 1 byte: only the first message (nothing precedes it), however large it is.
+        var first = await Store.ClaimAsync(new ClaimRequest(100, TimeSpan.FromMinutes(5), Guid.NewGuid(), "w") { MaxPayloadBytes = 1 }, Ct);
+        Assert.Equal([ids[0]], first.Select(m => m.Id));
+
+        // Budget 3 x size + 1: the next four (0, size, 2 x size and 3 x size bytes precede them), not the fifth.
+        var next = await Store.ClaimAsync(new ClaimRequest(100, TimeSpan.FromMinutes(5), Guid.NewGuid(), "w") { MaxPayloadBytes = (3L * size) + 1 }, Ct);
+        Assert.Equal(ids.Skip(1).Take(4), next.Select(m => m.Id));
+
+        // The cut message was not touched and is claimed normally.
+        var rest = await ClaimAsync();
+        var last = Assert.Single(rest);
+        Assert.Equal(ids[5], last.Id);
+        Assert.Equal(1, last.AttemptCount);
+
+        // The default budget (64 MiB) does not limit ordinary batches.
+        Assert.Equal(OutboxLimits.BatchPayloadBudgetBytes, new ClaimRequest(1, TimeSpan.FromSeconds(1), Guid.NewGuid(), "w").MaxPayloadBytes);
+    }
+
+    [Fact]
     public async Task Claim_respects_batch_size_and_availability_order()
     {
         RequireDatabase();
