@@ -338,12 +338,100 @@ public sealed class PostgreSqlProviderTests(PostgreSqlFixture fixture)
         }
     }
 
-    private async Task<string> ExplainAsync(string sql, params object[] parameters)
+    [Fact]
+    public async Task Planner_chooses_the_partial_indexes_on_a_realistic_table()
+    {
+        // T-03: the test above proves the indexes are usable (seqscan disabled, 5 rows). This one proves the planner CHOOSES them
+        // on a steady-state table, including the statistics query (CR-03), which a sequential scan would make O(table).
+        RequireDatabase();
+        var schema = PostgreSqlTestHelpers.NewSchemaName();
+        await using var sp = Build(relay => relay.UsePostgreSql(fixture.DataSource, pg => pg.Schema = schema));
+        try
+        {
+            await sp.GetRequiredService<IOutboxSchemaManager>().EnsureCreatedAsync(Ct);
+            var settings = PostgreSqlSettings.Create(pg => pg.Schema = schema);
+            await using (var connection = await fixture.DataSource.OpenConnectionAsync(Ct))
+            {
+                // 100,000 rows: 2.5% due pending, 2.5% dead-lettered, 95% delivered (as in the SQL Server plan test).
+                await connection.ExecuteAsync(
+                    $"""
+                    INSERT INTO {settings.Table} (id, message_type, payload, content_type, status, attempt_count, created_at, scheduled_at,
+                                                 available_at, delivered_at, dead_lettered_at)
+                    SELECT gen_random_uuid(), 'plan.test', '\x7b7d'::bytea, 'application/json',
+                           CASE WHEN i % 40 = 0 THEN 0 WHEN i % 40 = 1 THEN 3 ELSE 2 END,
+                           1, now() - i * interval '1 second', now() - i * interval '1 second', now() - i * interval '1 second',
+                           CASE WHEN i % 40 > 1 THEN now() - i * interval '1 second' END,
+                           CASE WHEN i % 40 = 1 THEN now() - i * interval '1 second' END
+                    FROM generate_series(1, 100000) AS i
+                    """,
+                    commandTimeout: 120);
+
+                // Sets the visibility map (index-only scans) and the statistics, as autovacuum would on a live table.
+                await connection.ExecuteAsync($"VACUUM ANALYZE {settings.Table}", commandTimeout: 120);
+            }
+
+            var plans = new Dictionary<string, string>
+            {
+                ["claim"] = await ExplainAsync(settings.ClaimSql, disableSeqScan: false, 100, Guid.NewGuid(), "explain-worker", TimeSpan.FromMinutes(2)),
+                ["delete-delivered"] = await ExplainAsync(settings.DeleteDeliveredSql, disableSeqScan: false, TimeSpan.FromDays(7), 1000),
+                ["requeue-dead-lettered"] = await ExplainAsync(settings.RequeueDeadLetteredSql, disableSeqScan: false, 100),
+                ["statistics"] = await ExplainAsync(settings.StatisticsSql, disableSeqScan: false),
+                ["admin-query-dead-lettered"] = await ExplainAsync(
+                    settings.QuerySqlPrefix + " WHERE status = $1 ORDER BY created_at, id OFFSET $2 LIMIT $3",
+                    disableSeqScan: false,
+                    (short)OutboxMessageStatus.DeadLettered,
+                    0,
+                    100),
+            };
+
+            foreach (var (name, plan) in plans)
+            {
+                TestContext.Current.TestOutputHelper?.WriteLine($"-- {name}{Environment.NewLine}{plan}");
+            }
+
+            Assert.Contains($"using {settings.ClaimIndexName}", plans["claim"], StringComparison.Ordinal);
+            Assert.Contains("LockRows", plans["claim"], StringComparison.Ordinal);
+            Assert.Contains(settings.CleanupIndexName, plans["delete-delivered"], StringComparison.Ordinal);
+            Assert.Contains(settings.DeadIndexName, plans["requeue-dead-lettered"], StringComparison.Ordinal);
+            Assert.Contains(settings.DeadIndexName, plans["admin-query-dead-lettered"], StringComparison.Ordinal);
+
+            // Statistics: pending, processing and the oldest-due age use the claim index; dead-lettered uses the dead index. The
+            // Delivered count is O(delivered rows) whichever plan is chosen (K12): with 95% of rows delivered the planner may
+            // prefer a sequential scan to an index-only scan of the cleanup index, so exactly that one scan is allowed.
+            Assert.True(Occurrences(plans["statistics"], settings.ClaimIndexName) >= 3, plans["statistics"]);
+            Assert.Contains(settings.DeadIndexName, plans["statistics"], StringComparison.Ordinal);
+            Assert.True(Occurrences(plans["statistics"], "Seq Scan") <= 1, plans["statistics"]);
+            foreach (var (name, plan) in plans.Where(p => p.Key != "statistics"))
+            {
+                Assert.False(plan.Contains("Seq Scan", StringComparison.Ordinal), $"{name} uses a sequential scan:{Environment.NewLine}{plan}");
+            }
+        }
+        finally
+        {
+            await PostgreSqlTestHelpers.DropSchemaAsync(fixture.DataSource, schema);
+        }
+    }
+
+    private static int Occurrences(string text, string value)
+    {
+        var count = 0;
+        for (var i = text.IndexOf(value, StringComparison.Ordinal); i >= 0; i = text.IndexOf(value, i + value.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
+    }
+
+    private Task<string> ExplainAsync(string sql, params object[] parameters) => ExplainAsync(sql, disableSeqScan: true, parameters);
+
+    private async Task<string> ExplainAsync(string sql, bool disableSeqScan, params object[] parameters)
     {
         await using var connection = await fixture.DataSource.OpenConnectionAsync(Ct);
         await using var transaction = await connection.BeginTransactionAsync(Ct);
-        await using (var off = new NpgsqlCommand("SET LOCAL enable_seqscan = off", connection, transaction))
+        if (disableSeqScan)
         {
+            await using var off = new NpgsqlCommand("SET LOCAL enable_seqscan = off", connection, transaction);
             await off.ExecuteNonQueryAsync(Ct);
         }
 

@@ -26,4 +26,9 @@
     </AssemblyAttribute>
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- K13: per-test schema names and the stale-schema sweep. -->
+    <Compile Include="..\Shared\TestSchemaNames.cs" Link="Shared\TestSchemaNames.cs" />
+  </ItemGroup>
+
 </Project>

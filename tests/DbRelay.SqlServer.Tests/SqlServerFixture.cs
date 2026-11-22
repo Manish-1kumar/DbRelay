@@ -93,6 +93,14 @@ public sealed class SqlServerFixture : IAsyncLifetime
         {
             RcsiSkipReason = $"Database '{rcsiDatabase}' could not be switched to READ_COMMITTED_SNAPSHOT ON.";
         }
+
+        // K13: remove schemas left behind by killed test processes.
+        foreach (var connectionString in new[] { ConnectionString, RcsiConnectionString })
+        {
+            await using var connection = new SqlConnection(connectionString);
+            await connection.OpenAsync();
+            await DbRelay.Testing.TestSchemaNames.SweepSqlServerAsync(connection);
+        }
     }
 
     public async ValueTask DisposeAsync()

@@ -57,6 +57,6 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 - **Uniform `transaction: null` semantics (CR-11).**
 - **Aggregate enqueue size limits (CR-18).**
 - **`created_at` index for admin queries (CR-21).**
-- **Automated PostgreSQL large-table plan assertion (T-03).**
-- **Test fixtures that sweep orphaned `t_*` schemas left by killed test processes.**
+- ~~**Automated PostgreSQL large-table plan assertion (T-03).**~~ Done: `Planner_chooses_the_partial_indexes_on_a_realistic_table` (100k rows, no `enable_seqscan` override; mutation-checked against the pre-CR-03 statistics query).
+- ~~**Test fixtures that sweep orphaned `t_*` schemas left by killed test processes.**~~ Done (K13).
 - **SQL Server package release; Azure SQL and SQL Server 2019 testing.**

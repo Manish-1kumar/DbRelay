@@ -480,7 +480,7 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture) : IAsyncLif
 
     private void RequireDatabase(bool rcsi) => Assert.SkipWhen(fixture.GetSkipReason(rcsi) is not null, fixture.GetSkipReason(rcsi) ?? string.Empty);
 
-    private static string NewSchema() => "p_" + Guid.NewGuid().ToString("N")[..16];
+    private static string NewSchema() => DbRelay.Testing.TestSchemaNames.New("p");
 
     private ServiceProvider Build(string connectionString, string schema, Action<DbRelayBuilder> useStorage)
     {

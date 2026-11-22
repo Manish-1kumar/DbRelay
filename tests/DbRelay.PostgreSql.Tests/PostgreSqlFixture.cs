@@ -56,6 +56,7 @@ public sealed class PostgreSqlFixture : IAsyncLifetime
 
         _dataSource = NpgsqlDataSource.Create(ConnectionString);
         await using var connection = await _dataSource.OpenConnectionAsync();
+        await DbRelay.Testing.TestSchemaNames.SweepPostgreSqlAsync(connection); // K13: schemas left by killed test processes
     }
 
     public async ValueTask DisposeAsync()

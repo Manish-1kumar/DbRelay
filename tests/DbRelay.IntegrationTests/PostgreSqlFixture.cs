@@ -61,6 +61,7 @@ public sealed class PostgreSqlFixture : IAsyncLifetime
         var builder = new NpgsqlConnectionStringBuilder(ConnectionString) { ApplicationName = "dbrelay-it-fixture" };
         _dataSource = NpgsqlDataSource.Create(builder.ConnectionString);
         await using var connection = await _dataSource.OpenConnectionAsync();
+        await DbRelay.Testing.TestSchemaNames.SweepPostgreSqlAsync(connection); // K13: schemas left by killed test processes
     }
 
     public async ValueTask DisposeAsync()

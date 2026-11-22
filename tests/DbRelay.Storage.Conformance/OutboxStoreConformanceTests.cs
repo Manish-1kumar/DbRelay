@@ -23,7 +23,7 @@ public abstract class OutboxStoreConformanceTests : IAsyncLifetime
 
     private ServiceProvider? _services;
 
-    protected string Schema { get; } = "t_" + Guid.NewGuid().ToString("N")[..16];
+    protected string Schema { get; } = DbRelay.Testing.TestSchemaNames.New("t");
 
     protected IOutbox Outbox => _services!.GetRequiredService<IOutbox>();
 

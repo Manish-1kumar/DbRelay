@@ -66,15 +66,20 @@ update that table.
 
 ### Cleaning up after interrupted test runs
 
-Each database test creates its own randomly named schema (`t_` or, for integration tests, `it_`, plus 16 hex characters) and drops it when the test finishes. If a
-test process is killed (Ctrl+C, a debugger stop, an IDE cancel), those schemas stay behind. They are harmless, but you can
-remove them from a **test** database:
+Each database test creates its own schema and drops it when the test finishes. The name is `t_`, `p_` or (for integration
+tests) `it_`, followed by 16 hex characters: 8 for the creation time and 8 random. If a test process is killed (Ctrl+C, a
+debugger stop, an IDE cancel), its schemas stay behind. The next test run removes them automatically once they are more than
+6 hours old (`tests/Shared/TestSchemaNames.cs`). Younger schemas are never touched, because the target frameworks run their
+tests in parallel against the same database.
+
+To remove every test schema at once, for example after renaming the format, run the following against a **test** database
+only, while no tests are running:
 
 ```sql
 -- PostgreSQL (run against the test database only)
 DO $$ DECLARE s text;
 BEGIN
-  FOR s IN SELECT nspname FROM pg_namespace WHERE nspname ~ '^i?t_[0-9a-f]{16}$' LOOP
+  FOR s IN SELECT nspname FROM pg_namespace WHERE nspname ~ '^(t|it|p)_[0-9a-f]{16}$' LOOP
     EXECUTE format('DROP SCHEMA %I CASCADE', s);
   END LOOP;
 END $$;
@@ -84,10 +89,12 @@ END $$;
 -- SQL Server (run in dbrelay_tests and dbrelay_tests_rcsi only)
 DECLARE @sql nvarchar(max) = N'';
 SELECT @sql += N'DROP TABLE ' + QUOTENAME(s.name) + N'.' + QUOTENAME(t.name) + N';'
-FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE s.name LIKE 't[_]________________';
+FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE s.name LIKE 't[_]________________' OR s.name LIKE 'p[_]________________' OR s.name LIKE 'it[_]________________';
 EXEC (@sql);
 SET @sql = N'';
-SELECT @sql += N'DROP SCHEMA ' + QUOTENAME(name) + N';' FROM sys.schemas WHERE name LIKE 't[_]________________';
+SELECT @sql += N'DROP SCHEMA ' + QUOTENAME(name) + N';' FROM sys.schemas
+WHERE name LIKE 't[_]________________' OR name LIKE 'p[_]________________' OR name LIKE 'it[_]________________';
 EXEC (@sql);
 ```
 

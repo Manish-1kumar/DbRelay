@@ -4,7 +4,7 @@ namespace DbRelay.PostgreSql.Tests;
 
 internal static class PostgreSqlTestHelpers
 {
-    public static string NewSchemaName() => "p_" + Guid.NewGuid().ToString("N")[..16];
+    public static string NewSchemaName() => DbRelay.Testing.TestSchemaNames.New("p");
 
     public static async Task<DateTimeOffset> GetDatabaseNowAsync(NpgsqlDataSource dataSource)
     {

@@ -74,7 +74,7 @@ public sealed class TestSchema : IAsyncDisposable
     public static async Task<TestSchema> CreateAsync(PostgreSqlFixture fixture)
     {
         Assert.SkipWhen(fixture.SkipReason is not null, fixture.SkipReason ?? string.Empty);
-        var schema = new TestSchema(fixture, "it_" + Guid.NewGuid().ToString("N")[..16]);
+        var schema = new TestSchema(fixture, DbRelay.Testing.TestSchemaNames.New("it"));
 
         // Schema creation goes through the public IOutboxSchemaManager, exactly as an application would do it.
         await using (var producer = schema.CreateProducer())
