@@ -1,0 +1,10 @@
+# Normalise line endings in the repository to LF (matches .editorconfig and the Linux CI runners).
+* text=auto eol=lf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.ico binary
+*.snk binary
+*.nupkg binary
+*.snupkg binary

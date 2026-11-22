@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest an improvement to DbRelay.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        DbRelay deliberately stays small: a transactional outbox with a published reliability contract. Features that turn it
+        into a messaging framework (sagas, routing topologies, broker abstractions) are usually out of scope; the README's
+        "When not to use DbRelay" section lists libraries that do those well.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what makes it hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: The API or behaviour you would like, ideally with a code sketch.
+      render: csharp
+  - type: textarea
+    id: guarantees
+    attributes:
+      label: Effect on delivery guarantees
+      description: Does this change at-least-once delivery, ordering, transaction ownership or the database contract?
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

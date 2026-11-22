@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DbRelay</RootNamespace>
+    <Description>Contracts for DbRelay, a lightweight transactional outbox for .NET: IOutbox, OutboxMessage, IMessageDeliveryHandler and DeliveryResult. Reference this package from application and handler code; it has no dependencies.</Description>
+  </PropertyGroup>
+
+</Project>

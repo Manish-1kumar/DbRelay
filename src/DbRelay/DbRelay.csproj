@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DbRelay</RootNamespace>
+    <Description>DbRelay engine: transactional outbox registration, background dispatcher with leases and lock tokens, retries with jittered backoff, dead-lettering, health checks and OpenTelemetry-compatible traces and metrics. Pair it with a storage provider such as DbRelay.PostgreSql.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DbRelay.Abstractions\DbRelay.Abstractions.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DbRelay.Tests" />
+  </ItemGroup>
+
+</Project>

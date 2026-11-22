@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    A tiny DbRelay worker used by DbRelay.IntegrationTests as a real child process that can be killed mid-delivery.
+    It is not a test project: it does not reference xUnit, so the global 'using Xunit;' from tests/Directory.Build.props is removed.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DbRelay.CrashWorker</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Using Remove="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DbRelay.PostgreSql\DbRelay.PostgreSql.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+
+</Project>

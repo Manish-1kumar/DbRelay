@@ -1,0 +1,13 @@
+bin/
+obj/
+artifacts/
+TestResults/
+BenchmarkDotNet.Artifacts/
+*.user
+*.suo
+.vs/
+.idea/
+*.swp
+.DS_Store
+coverage*.xml
+.claude/settings.local.json

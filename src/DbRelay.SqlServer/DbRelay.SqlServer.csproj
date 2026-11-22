@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DbRelay.SqlServer</RootNamespace>
+    <Description>SQL Server storage provider for DbRelay (Microsoft.Data.SqlClient): transactional outbox inserts in the caller's SqlTransaction, UPDLOCK/READPAST/ROWLOCK claiming with leases and lock tokens, retention cleanup and explicit, idempotent schema creation. Targets SQL Server 2019+ and Azure SQL, with or without READ_COMMITTED_SNAPSHOT (tested on SQL Server 2022).</Description>
+    <!--
+      Package strategy (project brief §15): the first release (0.1.0) ships only the PostgreSQL packages and their abstractions.
+      The SQL Server provider is built and tested in every CI run, but is not packed until its release milestone (0.2.0).
+      Pack it explicitly with -p:DbRelayPackSqlServer=true.
+    -->
+    <IsPackable Condition="'$(DbRelayPackSqlServer)' != 'true'">false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DbRelay\DbRelay.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.SqlClient" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Scripts\001_create_outbox.sql" LogicalName="DbRelay.SqlServer.Scripts.001_create_outbox.sql" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DbRelay.SqlServer.Tests" />
+  </ItemGroup>
+
+</Project>

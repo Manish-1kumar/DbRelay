@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DbRelay.PostgreSql</RootNamespace>
+    <Description>PostgreSQL storage provider for DbRelay (Npgsql): transactional outbox inserts in the caller's NpgsqlTransaction, FOR UPDATE SKIP LOCKED claiming with leases and lock tokens, retention cleanup and explicit, idempotent schema creation.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DbRelay\DbRelay.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Npgsql" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Scripts\001_create_outbox.sql" LogicalName="DbRelay.PostgreSql.Scripts.001_create_outbox.sql" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DbRelay.PostgreSql.Tests" />
+  </ItemGroup>
+
+</Project>

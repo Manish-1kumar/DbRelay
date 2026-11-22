@@ -1,0 +1,65 @@
+<Project>
+  <!--
+    Central package management.
+    Microsoft.Extensions.* versions are pinned per target framework so a net8.0 consumer
+    is never forced onto 9.x/10.x/11.x packages (ADR 0001, D1).
+  -->
+
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <MicrosoftExtensionsVersion>8.0.2</MicrosoftExtensionsVersion>
+    <MicrosoftExtensionsHostingAbstractionsVersion>8.0.1</MicrosoftExtensionsHostingAbstractionsVersion>
+    <MicrosoftExtensionsLoggingAbstractionsVersion>8.0.3</MicrosoftExtensionsLoggingAbstractionsVersion>
+    <MicrosoftExtensionsHealthChecksVersion>8.0.34</MicrosoftExtensionsHealthChecksVersion>
+    <MicrosoftExtensionsHostingVersion>8.0.1</MicrosoftExtensionsHostingVersion>
+    <MicrosoftExtensionsTimeProviderTestingVersion>8.10.0</MicrosoftExtensionsTimeProviderTestingVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net9.0'">
+    <MicrosoftExtensionsVersion>9.0.23</MicrosoftExtensionsVersion>
+    <MicrosoftExtensionsHostingAbstractionsVersion>9.0.23</MicrosoftExtensionsHostingAbstractionsVersion>
+    <MicrosoftExtensionsLoggingAbstractionsVersion>9.0.23</MicrosoftExtensionsLoggingAbstractionsVersion>
+    <MicrosoftExtensionsHealthChecksVersion>9.0.23</MicrosoftExtensionsHealthChecksVersion>
+    <MicrosoftExtensionsHostingVersion>9.0.23</MicrosoftExtensionsHostingVersion>
+    <MicrosoftExtensionsTimeProviderTestingVersion>9.10.0</MicrosoftExtensionsTimeProviderTestingVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <MicrosoftExtensionsVersion>10.0.15</MicrosoftExtensionsVersion>
+    <MicrosoftExtensionsHostingAbstractionsVersion>10.0.15</MicrosoftExtensionsHostingAbstractionsVersion>
+    <MicrosoftExtensionsLoggingAbstractionsVersion>10.0.15</MicrosoftExtensionsLoggingAbstractionsVersion>
+    <MicrosoftExtensionsHealthChecksVersion>10.0.15</MicrosoftExtensionsHealthChecksVersion>
+    <MicrosoftExtensionsHostingVersion>10.0.15</MicrosoftExtensionsHostingVersion>
+    <MicrosoftExtensionsTimeProviderTestingVersion>10.11.0</MicrosoftExtensionsTimeProviderTestingVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net11.0' or '$(TargetFramework)' == ''">
+    <MicrosoftExtensionsVersion>11.0.0</MicrosoftExtensionsVersion>
+    <MicrosoftExtensionsHostingAbstractionsVersion>11.0.0</MicrosoftExtensionsHostingAbstractionsVersion>
+    <MicrosoftExtensionsLoggingAbstractionsVersion>11.0.0</MicrosoftExtensionsLoggingAbstractionsVersion>
+    <MicrosoftExtensionsHealthChecksVersion>11.0.0</MicrosoftExtensionsHealthChecksVersion>
+    <MicrosoftExtensionsHostingVersion>11.0.0</MicrosoftExtensionsHostingVersion>
+    <MicrosoftExtensionsTimeProviderTestingVersion>11.0.0</MicrosoftExtensionsTimeProviderTestingVersion>
+  </PropertyGroup>
+
+  <ItemGroup Label="Library dependencies">
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="$(MicrosoftExtensionsVersion)" />
+    <PackageVersion Include="Microsoft.Extensions.Options" Version="$(MicrosoftExtensionsVersion)" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="$(MicrosoftExtensionsHostingAbstractionsVersion)" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="$(MicrosoftExtensionsLoggingAbstractionsVersion)" />
+    <PackageVersion Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="$(MicrosoftExtensionsHealthChecksVersion)" />
+    <PackageVersion Include="Npgsql" Version="10.0.3" />
+    <PackageVersion Include="Microsoft.Data.SqlClient" Version="7.1.2" />
+  </ItemGroup>
+
+  <ItemGroup Label="Test, sample and benchmark dependencies">
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="$(MicrosoftExtensionsHostingVersion)" />
+    <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="$(MicrosoftExtensionsTimeProviderTestingVersion)" />
+    <PackageVersion Include="xunit.v3" Version="4.0.3" />
+    <PackageVersion Include="xunit.v3.extensibility.core" Version="4.0.3" />
+    <PackageVersion Include="xunit.v3.assert" Version="4.0.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.1" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.12.0" />
+    <PackageVersion Include="Testcontainers.PostgreSql" Version="4.17.0" />
+    <PackageVersion Include="Testcontainers.MsSql" Version="4.17.0" />
+    <PackageVersion Include="Dapper" Version="2.1.89" />
+    <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Provider-neutral behavioural specification of IOutboxStore. Each provider's test project derives from
+    OutboxStoreConformanceTests and supplies a real database. This is a library, not a test project.
+  -->
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DbRelay\DbRelay.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="xunit.v3.extensibility.core" />
+    <PackageReference Include="xunit.v3.assert" />
+    <PackageReference Include="Dapper" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+
+</Project>
