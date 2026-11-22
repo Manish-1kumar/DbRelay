@@ -53,7 +53,7 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
   it is tagged from the current `main`.
 - ~~**Batched release on shutdown (CR-08).**~~ Done.
 - **Batched-acknowledgement follow-ups:** a bounded leader hand-off (BA-05) and a SQL Server lock-behaviour stress test (BA-07).
-- **Single-statement multi-row insert on PostgreSQL.** Measured opportunity.
+- ~~**Single-statement multi-row insert on PostgreSQL.**~~ Done: `unnest` over parallel arrays; re-measured in `docs/benchmarks.md` (about 0.4 ms less per 10 messages, modest).
 - **Uniform `transaction: null` semantics (CR-11).**
 - ~~**Aggregate enqueue size limits (CR-18).**~~ Done (ADR 0004): 64 MiB per enqueue call and per claim.
 - ~~**`created_at` index for admin queries (CR-21).**~~ Resolved without an index (it measured +25-28% insert cost). PostgreSQL admin paging now sorts only the narrow keys, as SQL Server does, and `Skip` is capped at 10,000. See `docs/troubleshooting.md`.

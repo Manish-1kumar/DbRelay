@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - A claim stops adding messages once their payloads reach 64 MiB; the first message is always claimed. New
     `OutboxLimits.BatchPayloadBudgetBytes` and init-only `ClaimRequest.MaxPayloadBytes`; custom stores keep compiling, and
     the conformance suite checks the rule.
+- PostgreSQL `EnqueueManyAsync` writes all messages with one `INSERT ... SELECT FROM unnest(...)` statement instead of one
+  command per row (about 0.4 ms less per 10 messages locally; `docs/benchmarks.md`).
 - **`OutboxQuery.Skip` is limited to 10,000** (CR-21); larger values throw `ArgumentOutOfRangeException`. Narrow the query
   with filters instead of paging deeper.
 - PostgreSQL admin queries sort only `(created_at, id)` and then fetch the page's rows, as the SQL Server provider does. On a

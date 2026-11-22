@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Runtime.InteropServices;
 using System.Text;
 using DbRelay.Storage;
 using Npgsql;
@@ -315,6 +316,13 @@ internal sealed class PostgreSqlOutboxStore : IOutboxStore, IOutboxBatchStore
         }
 
         batch.Timeout = _settings.CommandTimeoutSeconds;
+        if (records.Count > 1)
+        {
+            batch.BatchCommands.Add(CreateInsertManyCommand(records));
+            await batch.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         foreach (var record in records)
         {
             var command = new NpgsqlBatchCommand(_settings.InsertSql);
@@ -334,6 +342,56 @@ internal sealed class PostgreSqlOutboxStore : IOutboxStore, IOutboxBatchStore
 
         await batch.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>One multi-row insert over parallel arrays (see <see cref="PostgreSqlSettings.InsertManySql"/>).</summary>
+    private NpgsqlBatchCommand CreateInsertManyCommand(IReadOnlyList<OutboxRecord> records)
+    {
+        var count = records.Count;
+        var ids = new Guid[count];
+        var types = new string[count];
+        var destinations = new string?[count];
+        var payloads = new byte[count][];
+        var contentTypes = new string[count];
+        var headers = new string?[count];
+        var correlationIds = new string?[count];
+        var causationIds = new string?[count];
+        var deliverAt = new DateTimeOffset?[count];
+        var delays = new TimeSpan?[count];
+        for (var i = 0; i < count; i++)
+        {
+            var record = records[i];
+            ids[i] = record.Id;
+            types[i] = record.MessageType;
+            destinations[i] = record.Destination;
+            payloads[i] = AsArray(record.Payload);
+            contentTypes[i] = record.ContentType;
+            headers[i] = record.HeadersJson;
+            correlationIds[i] = record.CorrelationId;
+            causationIds[i] = record.CausationId;
+            deliverAt[i] = record.DeliverAt?.ToUniversalTime();
+            delays[i] = record.Delay;
+        }
+
+        var command = new NpgsqlBatchCommand(_settings.InsertManySql);
+        var parameters = command.Parameters;
+        parameters.Add(new NpgsqlParameter<Guid[]> { TypedValue = ids, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Uuid });
+        parameters.Add(new NpgsqlParameter<string[]> { TypedValue = types, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+        parameters.Add(new NpgsqlParameter<string?[]> { TypedValue = destinations, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+        parameters.Add(new NpgsqlParameter<byte[][]> { TypedValue = payloads, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea });
+        parameters.Add(new NpgsqlParameter<string[]> { TypedValue = contentTypes, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+        parameters.Add(new NpgsqlParameter<string?[]> { TypedValue = headers, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
+        parameters.Add(new NpgsqlParameter<string?[]> { TypedValue = correlationIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+        parameters.Add(new NpgsqlParameter<string?[]> { TypedValue = causationIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+        parameters.Add(new NpgsqlParameter<DateTimeOffset?[]> { TypedValue = deliverAt, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.TimestampTz });
+        parameters.Add(new NpgsqlParameter<TimeSpan?[]> { TypedValue = delays, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Interval });
+        return command;
+    }
+
+    /// <summary>The payload as an exact-length array, without copying when it already is one (the serializer's usual output).</summary>
+    private static byte[] AsArray(ReadOnlyMemory<byte> payload) =>
+        MemoryMarshal.TryGetArray(payload, out var segment) && segment.Array is { } array && segment.Offset == 0 && segment.Count == array.Length
+            ? array
+            : payload.ToArray();
 
     public Task<IReadOnlyCollection<OutboxAcknowledgement>> MarkDeliveredBatchAsync(IReadOnlyList<OutboxAcknowledgement> items, CancellationToken cancellationToken) =>
         ExecuteGuardedBatchAsync(_settings.MarkDeliveredBatchSql, items, cancellationToken);

@@ -331,6 +331,73 @@ public abstract class OutboxStoreConformanceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task EnqueueMany_stores_every_field_of_every_message()
+    {
+        // The PostgreSQL provider writes several messages with one multi-row statement over parallel arrays; every column of
+        // every row must come out exactly as a single-row insert would store it, including NULLs and both scheduling forms.
+        RequireDatabase();
+        var dbNow = await GetDatabaseNowAsync();
+        var deliverAt = new DateTimeOffset(dbNow.UtcDateTime.AddHours(2).Ticks / TimeSpan.TicksPerMillisecond * TimeSpan.TicksPerMillisecond, TimeSpan.Zero);
+        var full = new EnqueueOptions
+        {
+            Destination = "orders-topic",
+            CorrelationId = "corr-1",
+            CausationId = "cause-1",
+            Delay = TimeSpan.FromHours(1),
+            Headers = new Dictionary<string, string> { ["tenant"] = "t1", ["unicode"] = "é中" },
+        };
+
+        IReadOnlyList<Guid> withOptions, scheduled, plain;
+        await using (var connection = await OpenConnectionAsync())
+        await using (var transaction = await connection.BeginTransactionAsync(Ct))
+        {
+            withOptions = await Outbox.EnqueueManyAsync(connection, transaction, new[] { new TestMessage("a"), new TestMessage("b"), new TestMessage("c") }, full, Ct);
+            scheduled = await Outbox.EnqueueManyAsync(connection, transaction, new[] { new TestMessage("d"), new TestMessage("e") }, new EnqueueOptions { DeliverAt = deliverAt }, Ct);
+            plain = await Outbox.EnqueueManyAsync(transaction, new[] { new TestMessage("f"), new TestMessage("g") }, cancellationToken: Ct);
+            await transaction.CommitAsync(Ct);
+        }
+
+        string[] texts = ["a", "b", "c"];
+        for (var i = 0; i < withOptions.Count; i++)
+        {
+            var m = (await Admin.GetAsync(withOptions[i], Ct))!;
+            Assert.Equal($"{{\"text\":\"{texts[i]}\"}}", System.Text.Encoding.UTF8.GetString(m.Payload.Span));
+            Assert.Equal("conformance.test", m.MessageType);
+            Assert.Equal("application/json", m.ContentType);
+            Assert.Equal("orders-topic", m.Destination);
+            Assert.Equal("corr-1", m.CorrelationId);
+            Assert.Equal("cause-1", m.CausationId);
+            Assert.Equal("t1", m.Headers["tenant"]);
+            Assert.Equal("é中", m.Headers["unicode"]);
+            Assert.Equal(OutboxMessageStatus.Pending, m.Status);
+            Assert.Equal(0, m.AttemptCount);
+            Assert.InRange(m.AvailableAt, dbNow.AddHours(1).AddSeconds(-5), dbNow.AddHours(1).AddSeconds(30));
+            Assert.Equal(m.AvailableAt, m.ScheduledAt);
+        }
+
+        foreach (var id in scheduled)
+        {
+            var m = (await Admin.GetAsync(id, Ct))!;
+            Assert.Equal(deliverAt, m.AvailableAt);
+            Assert.Equal(deliverAt, m.ScheduledAt);
+        }
+
+        foreach (var id in plain)
+        {
+            var m = (await Admin.GetAsync(id, Ct))!;
+            Assert.Null(m.Destination);
+            Assert.Null(m.CorrelationId);
+            Assert.Null(m.CausationId);
+            Assert.DoesNotContain(m.Headers.Keys, k => k is "tenant" or "unicode");
+            Assert.InRange(m.AvailableAt, dbNow.AddSeconds(-5), dbNow.AddSeconds(30));
+        }
+
+        // Nothing scheduled is due yet; the two plain messages are.
+        var due = await ClaimAsync();
+        Assert.Equal(plain.Order(), due.Select(m => m.Id).Order());
+    }
+
+    [Fact]
     public async Task EnqueueRaw_preserves_payload_bytes_exactly()
     {
         RequireDatabase();

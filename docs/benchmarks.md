@@ -38,9 +38,21 @@ The "±" values are half of the 99.9% confidence interval.
 **Reading:** adding one outbox message costs about one extra database round trip, around 0.3 ms locally. A
 networked database adds its round-trip latency on top.
 
-**Optimisation opportunity (measured, not yet done):** on PostgreSQL, 10 messages cost 1.36 ms more than 1 message.
-`InsertAsync` sends an `NpgsqlBatch` with one command per row. A single multi-row `INSERT ... SELECT FROM unnest(...)`
-should reduce this. Planned for 0.2 and to be re-measured.
+**Multi-row insert on PostgreSQL (done 2026-11-22, re-measured).** `EnqueueManyAsync` used to send an `NpgsqlBatch` with
+one `INSERT` per row. It now sends one `INSERT ... SELECT FROM unnest(...)` over parallel arrays; a single message still uses
+the single-row statement. The two runs were back to back on the same machine, which was noisier than for the table above:
+
+| PostgreSQL | Before | After |
+|---|---|---|
+| Business insert only (baseline) | 678.0 µs ± 66.5 | 588.0 µs ± 48.6 |
+| + 1 outbox message | 1,422.6 µs ± 83.0 | 1,257.0 µs ± 26.3 |
+| + 10 outbox messages | 3,079.5 µs ± 418.4 | 2,524.6 µs ± 67.5 |
+| Extra cost of 10 messages over 1 | 1.66 ms | 1.27 ms |
+
+The gain is real but modest: about 0.4 ms per 10 messages (−24% of the extra cost). Measured against the baseline, it is
+within the noise (ratio 4.63 → 4.35, overlapping spreads). The remaining per-row cost, about 90–140 µs on both
+providers, is server-side insert work (heap, primary key and claim index) on this 2-core machine, not round trips.
+Allocations are unchanged (32 KB per 10 messages).
 
 An earlier run on a loaded machine had about 10× wider confidence intervals and was discarded.
 

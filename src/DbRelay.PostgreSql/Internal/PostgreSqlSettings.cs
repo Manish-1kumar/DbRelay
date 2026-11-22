@@ -53,6 +53,19 @@ internal sealed class PostgreSqlSettings
             "status, attempt_count, scheduled_at, available_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, " +
             "COALESCE($9, now() + COALESCE($10, interval '0')), COALESCE($9, now() + COALESCE($10, interval '0')))";
 
+        // Several rows: one statement over parallel arrays instead of one command per row. Same column expressions as InsertSql;
+        // unnest keeps the array order, so rows are inserted in the order given.
+        InsertManySql =
+            $"""
+            INSERT INTO {table} (id, message_type, destination, payload, content_type, headers, correlation_id, causation_id,
+                status, attempt_count, scheduled_at, available_at)
+            SELECT u.id, u.message_type, u.destination, u.payload, u.content_type, u.headers, u.correlation_id, u.causation_id, 0, 0,
+                COALESCE(u.deliver_at, now() + COALESCE(u.delay, interval '0')), COALESCE(u.deliver_at, now() + COALESCE(u.delay, interval '0'))
+            FROM unnest($1::uuid[], $2::text[], $3::text[], $4::bytea[], $5::text[], $6::jsonb[], $7::text[], $8::text[],
+                $9::timestamptz[], $10::interval[])
+                AS u(id, message_type, destination, payload, content_type, headers, correlation_id, causation_id, deliver_at, delay)
+            """;
+
         // One autocommitted statement. The locking CTE is MATERIALIZED so it is evaluated exactly once: a LIMIT ... FOR UPDATE
         // SKIP LOCKED subquery that the planner re-scans (for example under IN (...)) can return more than LIMIT rows.
         // RETURNING order is unspecified, so the final SELECT orders by the pre-claim available_at.
@@ -186,6 +199,8 @@ internal sealed class PostgreSqlSettings
     public string CreateScript { get; }
 
     public string InsertSql { get; }
+
+    public string InsertManySql { get; }
 
     public string ClaimSql { get; }
 
