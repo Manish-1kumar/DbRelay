@@ -368,3 +368,12 @@ The build had 0 warnings, and `dotnet format --verify-no-changes` was clean.
 The 2-hour PostgreSQL run used the build from before the BA review fixes; the other two used the final code.
 
 **Mutation checks:** for the BA-02 release token guard (both providers) and the batcher lost-wake-up race, the fix was reverted temporarily, the new test was confirmed failing, and the fix was restored.
+
+**CI and flaky-test fixes:**
+- **CI run 45023327704 failed 1,278/1,280.** `Delivered_acknowledgements_are_batched_under_concurrent_load` failed on net8.0 and net9.0 on Linux.
+- **A second local flake:** while the suite was being re-run repeatedly, `Claiming_pauses_while_abandoned_handlers_fill_every_slot` failed 2 of about 17 full-suite runs.
+- **Cause:** both were timing assumptions in the tests, not product defects.
+  - The in-memory store never overlapped acknowledgements.
+  - A blocking handler starved the thread pool, and the test settled on a fixed delay.
+- **Fix:** both tests were made deterministic, and both still fail on the corresponding mutation (batching off; abandoned-handler limit removed).
+- **Result:** the unit suite then passed 10 consecutive full runs (4,160/4,160), and CI run 45025481068 is green at 1,280/1,280 with 0 skipped.

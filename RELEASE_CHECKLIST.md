@@ -27,7 +27,7 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 | 16 | Performance benchmarks exist | ✅ | `docs/benchmarks.md` (BenchmarkDotNet + throughput sweep, environment recorded) |
 | 17 | Documentation accurate | ✅ | Snippets copied from compiling samples or compiled in a scratch project; docs updated after review fixes |
 | 18 | Sample applications run | ✅ | All 3 run against real DBs (docs engineer); PostgreSQL sample re-run after the fixes |
-| 19 | CI passes | ✅ | First GitHub Actions run (ubuntu, service containers) green: 1,140/1,140 tests, 0 skipped; PostgreSQL 15.20/16/18 compatibility jobs green (94 tests each, 0 skipped). Run 44996266454 |
+| 19 | CI passes | ✅ | Latest GitHub Actions run (ubuntu, service containers) green: 1,280/1,280 tests, 0 skipped; PostgreSQL 15/16/18 compatibility jobs green. Run 45025481068 (first green run: 44996266454, 1,140 tests) |
 | 20 | NuGet packages build and pass validation | ✅ | `dotnet pack` → 3 packages + symbols; contents and dependency groups inspected; package validation enabled |
 | 21 | No unresolved Critical/High findings | ✅ | Initial review: 1 High (CR-01). Follow-up audit found it partly fixed (FU-01, High) plus 1 Medium. Both fixed; FU-01 and FU-04 fixes mutation-checked. The FU fixes have not had an independent re-audit |
 | 22 | Release checklist complete | ⏳ | This file; the open items below |
