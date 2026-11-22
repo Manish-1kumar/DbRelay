@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Soak/chaos harness `tests/DbRelay.Soak`.** Producers with rollbacks, worker-process kills and graceful stops, database session
   kills, unreliable handlers, and invariant verification after a drain.
 
+### Changed
+
+- `DbRelay.PostgreSql` now depends on Npgsql 10.0.4 (was 10.0.3).
+
 ### Fixed
 
 - The abandoned-handler count, used by the health check and the gauge, could be left permanently stale by a race. It is now a
