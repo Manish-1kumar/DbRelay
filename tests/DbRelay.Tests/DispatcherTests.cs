@@ -432,6 +432,104 @@ public sealed class DispatcherTests
     }
 
     [Fact]
+    public async Task A_leader_under_sustained_load_hands_off_instead_of_holding_its_slot()
+    {
+        // BA-05: while acknowledgements keep arriving, a leader used to keep flushing until it saw an empty queue, holding its own
+        // delivery slot for the whole burst (measured 1.4 s with 20 ms flushes). Leadership is now bounded and handed off.
+        var store = new InMemoryOutboxStore();
+        const int Callers = 8;
+        const int PerCaller = 150;
+        for (var i = 0; i < Callers * PerCaller; i++)
+        {
+            store.Add($"m{i}");
+        }
+
+        var token = Guid.NewGuid();
+        var claimed = await store.ClaimAsync(new DbRelay.Storage.ClaimRequest(1000, TimeSpan.FromMinutes(5), token, "w"), Ct);
+        claimed = [.. claimed, .. await store.ClaimAsync(new DbRelay.Storage.ClaimRequest(1000, TimeSpan.FromMinutes(5), token, "w"), Ct)];
+        Assert.Equal(Callers * PerCaller, claimed.Count);
+        store.BeforeSingleDelivered = () => Task.Delay(10);
+        store.BeforeBatchDelivered = () => Task.Delay(10);
+
+        using var batcher = new DbRelay.Dispatching.AcknowledgementBatcher(
+            store, store, maxConcurrency: 4, (_, _) => Task.FromResult(false), // 4 -> a single leader slot
+            new DbRelayDiagnosticsHolder().Metrics, TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        var longest = TimeSpan.Zero;
+        var total = System.Diagnostics.Stopwatch.StartNew();
+        var gate = new object();
+        await Task.WhenAll(Enumerable.Range(0, Callers).Select(c => Task.Run(async () =>
+        {
+            foreach (var message in claimed.Skip(c * PerCaller).Take(PerCaller))
+            {
+                var started = System.Diagnostics.Stopwatch.StartNew();
+                Assert.True(await batcher.MarkDeliveredAsync(message, token));
+                lock (gate)
+                {
+                    longest = started.Elapsed > longest ? started.Elapsed : longest;
+                }
+            }
+        }, Ct))).WaitAsync(TimeSpan.FromSeconds(60), Ct);
+        total.Stop();
+
+        Assert.Equal(0, batcher.QueuedCount);
+        Assert.True(total.Elapsed > TimeSpan.FromSeconds(1), $"The load lasted only {total.Elapsed}; the test needs a sustained burst.");
+        Assert.True(longest < TimeSpan.FromMilliseconds(500), $"A single acknowledgement took {longest.TotalMilliseconds:F0} ms of a {total.Elapsed.TotalMilliseconds:F0} ms burst: a leader held its slot.");
+    }
+
+    [Fact]
+    public async Task A_leader_that_used_its_rounds_hands_off_to_the_waiting_follower_when_arrivals_stop()
+    {
+        // BA-05 hand-off, deterministic: during every flush exactly one new follower enqueues, so the queue is never empty after a
+        // round. After MaxLeaderRounds the leader must hand leadership to the waiting follower; if it just left, that follower
+        // (and every acknowledgement after it) would wait forever, because no further caller arrives to lead.
+        var store = new InMemoryOutboxStore();
+        for (var i = 0; i < 8; i++)
+        {
+            store.Add($"m{i}");
+        }
+
+        var token = Guid.NewGuid();
+        var claimed = await store.ClaimAsync(new DbRelay.Storage.ClaimRequest(8, TimeSpan.FromMinutes(5), token, "w"), Ct);
+        using var batcher = new DbRelay.Dispatching.AcknowledgementBatcher(
+            store, store, maxConcurrency: 4, (_, _) => Task.FromResult(false), // a single leader slot
+            new DbRelayDiagnosticsHolder().Metrics, TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        var followers = new System.Collections.Concurrent.ConcurrentQueue<Task<bool?>>();
+        Task<bool?>? leader = null;
+        var leaderDoneBeforeFollowerLed = false;
+        var flushes = 0;
+        async Task OnFlush()
+        {
+            var n = Interlocked.Increment(ref flushes);
+            if (n == DbRelay.Dispatching.AcknowledgementBatcher.MaxLeaderRounds + 1)
+            {
+                // The first round led by the promoted follower: the original leader has already handed off and returned.
+                leaderDoneBeforeFollowerLed = await Task.WhenAny(leader!, Task.Delay(TimeSpan.FromSeconds(5), Ct)) == leader;
+            }
+
+            if (n <= 6)
+            {
+                var expected = batcher.QueuedCount + 1;
+                followers.Enqueue(Task.Run(() => batcher.MarkDeliveredAsync(claimed[n], token), Ct));
+                await WaitUntilAsync(() => batcher.QueuedCount >= expected); // enqueued; its Wait(0) failed because a leader is flushing
+            }
+        }
+
+        store.BeforeSingleDelivered = OnFlush;
+        store.BeforeBatchDelivered = OnFlush;
+
+        leader = Task.Run(() => batcher.MarkDeliveredAsync(claimed[0], token), Ct);
+        Assert.True(await leader.WaitAsync(TimeSpan.FromSeconds(20), Ct));
+        await WaitUntilAsync(() => followers.Count == 6);
+        var results = await Task.WhenAll(followers).WaitAsync(TimeSpan.FromSeconds(20), Ct); // a stranded follower would time out here
+
+        Assert.All(results, r => Assert.True(r));
+        Assert.True(leaderDoneBeforeFollowerLed, "The original leader was still leading when the follower's round started.");
+        Assert.Equal(0, batcher.QueuedCount);
+    }
+
+    [Fact]
     public async Task A_follower_that_enqueues_just_before_the_leader_releases_is_not_stranded()
     {
         // Deterministic version of the lost-wake-up race. The leader has drained (its own item is done) and is about to release;

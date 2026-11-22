@@ -52,9 +52,9 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 - ~~**Batched acknowledgements.**~~ Done (ADR 0003, `docs/benchmarks.md` §3). It is in `[Unreleased]`, so 0.1.0 ships it if
   it is tagged from the current `main`.
 - ~~**Batched release on shutdown (CR-08).**~~ Done.
-- **Batched-acknowledgement follow-ups:** a bounded leader hand-off (BA-05). ~~SQL Server lock-behaviour stress test (BA-07)~~ done: `Concurrent_claims_batches_stale_acknowledgements_and_cleanup_never_deadlock` (0 deadlock retries in 24 runs).
+- ~~**Batched-acknowledgement follow-ups:** a bounded leader hand-off (BA-05).~~ Done: at most 4 rounds, then hand-off (deterministic and load tests; mutation-checked). ~~SQL Server lock-behaviour stress test (BA-07)~~ done: `Concurrent_claims_batches_stale_acknowledgements_and_cleanup_never_deadlock` (0 deadlock retries in 24 runs).
 - ~~**Single-statement multi-row insert on PostgreSQL.**~~ Done: `unnest` over parallel arrays; re-measured in `docs/benchmarks.md` (about 0.4 ms less per 10 messages, modest).
-- **Uniform `transaction: null` semantics (CR-11).**
+- ~~**Uniform `transaction: null` semantics (CR-11).**~~ Resolved as documented provider-specific behaviour: neither driver exposes the active transaction, so DbRelay cannot reject or adopt it uniformly. Both behaviours are now pinned by tests (T-05), and SQL Server explains the fix.
 - ~~**Aggregate enqueue size limits (CR-18).**~~ Done (ADR 0004): 64 MiB per enqueue call and per claim.
 - ~~**`created_at` index for admin queries (CR-21).**~~ Resolved without an index (it measured +25-28% insert cost). PostgreSQL admin paging now sorts only the narrow keys, as SQL Server does, and `Skip` is capped at 10,000. See `docs/troubleshooting.md`.
 - ~~**Automated PostgreSQL large-table plan assertion (T-03).**~~ Done: `Planner_chooses_the_partial_indexes_on_a_realistic_table` (100k rows, no `enable_seqscan` override; mutation-checked against the pre-CR-03 statistics query).

@@ -237,6 +237,35 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture) : IAsyncLif
         Assert.Equal(TimeSpan.Zero, stored.ScheduledAt.Offset);
     }
 
+    [Theory]
+    [InlineData(false, 1)]
+    [InlineData(false, 250)]
+    [InlineData(true, 1)]
+    public async Task Null_transaction_while_a_transaction_is_in_progress_is_rejected_with_guidance(bool rcsi, int messages)
+    {
+        // CR-11 / T-05: documented provider-specific behaviour. SqlClient rejects a command without the connection's pending local
+        // transaction (and, above 200 rows, a second BeginTransaction). DbRelay explains the fix, and the caller's transaction is
+        // left untouched and still usable.
+        RequireDatabase(rcsi);
+        var (services, _) = await CreateAsync(rcsi);
+        var outbox = services.GetRequiredService<IOutbox>();
+        await using var connection = new SqlConnection(fixture.GetConnectionString(rcsi));
+        await connection.OpenAsync(Ct);
+        await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(Ct);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => messages == 1
+            ? outbox.EnqueueAsync(connection, null, new TestMessage("x"), cancellationToken: Ct)
+            : outbox.EnqueueManyAsync(connection, null, Enumerable.Range(0, messages).Select(i => new TestMessage($"x{i}")), cancellationToken: Ct));
+        Assert.Contains("Pass that transaction", ex.Message, StringComparison.Ordinal);
+        Assert.IsType<InvalidOperationException>(ex.InnerException);
+
+        // The caller's transaction is still theirs and still works.
+        Assert.Same(connection, transaction.Connection);
+        var id = await outbox.EnqueueAsync(connection, transaction, new TestMessage("y"), cancellationToken: Ct);
+        await transaction.CommitAsync(Ct);
+        Assert.NotNull(await services.GetRequiredService<IOutboxAdmin>().GetAsync(id, Ct));
+    }
+
     // ---- Locking -----------------------------------------------------------------------------------------------------
 
     [Theory]
@@ -585,9 +614,14 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture) : IAsyncLif
             {
                 try
                 {
-                    await store.DeleteDeliveredAsync(TimeSpan.Zero, 50, stop.Token);
-                    var stats = await store.GetStatisticsAsync(stop.Token);
-                    if (stats.Pending + stats.Processing == 0)
+                    // A realistic retention: longer than any acknowledgement can arrive after its delivery (lease 800 ms + pause
+                    // 1.2 s). With a zero retention, cleanup deletes rows that late, stale acknowledgements are still locking in a
+                    // different order, which can deadlock (retried); docs/configuration.md says to keep retention above the lease.
+                    await store.DeleteDeliveredAsync(TimeSpan.FromSeconds(5), 50, stop.Token);
+
+                    // Finish on the recorded deliveries. GetStatisticsAsync uses READPAST on SQL Server (a monitoring query), so a
+                    // row locked by an in-flight update is not counted and "0 pending" could be seen too early.
+                    if (delivered.Count == MessageCount)
                     {
                         Volatile.Write(ref done, 1);
                     }
@@ -611,6 +645,8 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture) : IAsyncLif
         Assert.Equal(1, Volatile.Read(ref done)); // finished, not timed out
         Assert.Equal(ids.Order(), delivered.Keys.Order()); // every message delivered exactly once by token-guarded updates
         Assert.All(delivered.Values, count => Assert.Equal(1, count));
+        var stats = await store.GetStatisticsAsync(Ct); // all updates have finished, so nothing is locked now
+        Assert.Equal(0, stats.Pending + stats.Processing);
 
         // Every participant in this test is this store, so every deadlock has a victim here, and the store counts its retries.
         var retries = ((SqlServerOutboxStore)store).DeadlockRetries;

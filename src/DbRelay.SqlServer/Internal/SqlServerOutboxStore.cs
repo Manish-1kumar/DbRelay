@@ -1,5 +1,6 @@
 using System.Data;
 using System.Data.Common;
+using System.Data.SqlTypes;
 using System.Runtime.InteropServices;
 using DbRelay.Storage;
 using Microsoft.Data.SqlClient;
@@ -44,11 +45,24 @@ internal sealed class SqlServerOutboxStore : IOutboxStore, IOutboxBatchStore
         }
     }
 
-    public Task InsertAsync(DbConnection connection, DbTransaction? transaction, IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
+    public async Task InsertAsync(DbConnection connection, DbTransaction? transaction, IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
     {
         ValidateCallerResources(connection, transaction);
         ArgumentNullException.ThrowIfNull(records);
-        return InsertCoreAsync((SqlConnection)connection, (SqlTransaction?)transaction, records, cancellationToken);
+        try
+        {
+            await InsertCoreAsync((SqlConnection)connection, (SqlTransaction?)transaction, records, cancellationToken).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException exception) when (transaction is null)
+        {
+            // CR-11: SqlClient rejects a command without a transaction while the connection has a local transaction in progress (and
+            // rejects a second BeginTransaction). Neither driver exposes the active transaction, so DbRelay cannot adopt it; explain
+            // the fix instead of surfacing only SqlClient's message.
+            throw new InvalidOperationException(
+                "The outbox insert was rejected because no transaction was passed while the connection appears to have a transaction in progress. " +
+                "Pass that transaction to EnqueueAsync so the outbox row commits or rolls back with your business data. See the inner exception for SqlClient's message.",
+                exception);
+        }
     }
 
     public Task InsertStandaloneAsync(IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
@@ -241,6 +255,11 @@ internal sealed class SqlServerOutboxStore : IOutboxStore, IOutboxBatchStore
             throw new ArgumentOutOfRangeException(nameof(items), items.Count, $"At most {OutboxLimits.MaxClaimBatchSize} items per batch.");
         }
 
+        // BA-07: send items in SQL Server's own uniqueidentifier order (SqlGuid comparison, the order of ux_..._id). Measured: two
+        // batches holding acknowledgements for overlapping messages (a stale and a current claim) took U locks on the id index in
+        // opposite orders and deadlocked; every retry ran the same orders again, so all attempts could fail (5 of 48 stress runs).
+        // In canonical order every statement locks the keys in index order, whether its plan follows the input or sorts by id.
+        items = items.OrderBy(i => new SqlGuid(i.MessageId)).ThenBy(i => new SqlGuid(i.LockToken)).ToArray();
         var updated = new HashSet<OutboxAcknowledgement>();
         for (var offset = 0; offset < items.Count; offset += SqlServerOutboxSql.MaxBatchStatementItems)
         {

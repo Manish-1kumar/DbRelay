@@ -81,7 +81,7 @@ outcome, typically because the worker crashed), the message is dead-lettered **w
 | Option | Default | Valid range | Notes |
 |---|---|---|---|
 | `CleanupEnabled` | `true` | - | Deletes delivered messages older than `DeliveredRetention`. Dead letters are never deleted. |
-| `DeliveredRetention` | 1 day | 0 to 3650 days | Age since delivery, measured on the database clock. |
+| `DeliveredRetention` | 1 day | 0 to 3650 days | Age since delivery, measured on the database clock. Keep it well above `LeaseDuration`: on SQL Server, cleanup deleting rows that late, stale acknowledgements still lock can deadlock (the statement is retried, but it is avoidable). |
 | `CleanupInterval` | 5 min | 1 s to 1 day | |
 | `CleanupBatchSize` | 1000 | 1 to 10,000 | Rows per delete statement. Each run deletes at most 100 batches. If a run stops at that cap, the next run starts after 1 s instead of a full `CleanupInterval`, and event 1102 ("cleanup is behind") is logged. |
 | `StatisticsInterval` | 1 min | 1 s to 1 day, or `null` | How often statistics are queried for the `dbrelay.messages.*` gauges. `null` disables the query and the gauges. The query runs only on instances that run the dispatcher; enqueue-only instances skip it. The pending, processing and dead-letter counts use the partial indexes. The exact Delivered count is an index-only scan proportional to retained delivered rows: on PostgreSQL about 0.2–0.3 s per 2M retained rows, measured on a laptop. |

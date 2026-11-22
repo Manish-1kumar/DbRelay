@@ -35,8 +35,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - PostgreSQL admin queries sort only `(created_at, id)` and then fetch the page's rows, as the SQL Server provider does. On a
   1M-row table, a page at `Skip = 10,000` went from 1.6 s with about 400 MB spilled to disk to 0.5 s in memory.
 
+- **Batch leadership is bounded** (BA-05). A leader writes at most 4 round trips, then hands off to the oldest waiting follower
+  instead of holding its delivery slot for a whole burst.
+- **SQL Server:** passing `transaction: null` while the connection has a transaction in progress now fails with a message that
+  says to pass that transaction (CR-11). The provider-specific behaviour itself is unchanged and documented: PostgreSQL joins
+  the transaction, SQL Server rejects the call.
+
 ### Fixed
 
+- **SQL Server deadlocks found by a new stress test** (BA-07).
+  - Two batched acknowledgements for overlapping messages, for example a stale and a current claim, could lock the id index
+    in opposite orders. Items are now sent in SQL Server's `uniqueidentifier` order. PostgreSQL also uses a canonical order,
+    as defence in depth.
+  - The claim's payload-budget read could deadlock with a concurrent acknowledgement under READ COMMITTED. It now uses
+    `READPAST`, like the rest of the claim. This regression was introduced and fixed within this release cycle.
+  - Deadlock victims were always retried, but all three attempts could fail.
 - The abandoned-handler count, used by the health check and the gauge, could be left permanently stale by a race. It is now a
   single atomic counter.
 

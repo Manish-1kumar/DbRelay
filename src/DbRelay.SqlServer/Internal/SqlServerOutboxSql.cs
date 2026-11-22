@@ -93,13 +93,16 @@ internal sealed class SqlServerOutboxSql
             // CR-18 payload budget: keep a picked row only if the payloads before it total less than @max_payload_bytes (so the
             // first row is always kept). The windowed trim runs only when the total reaches the budget, so the common case costs
             // one aggregate over the picked rows' clustered seeks (measured +0.2-0.8 ms per claim of 100; ungated it was +2.2 ms).
-            // Trimmed rows stay U-locked until this short transaction commits and are not updated.
+            // Trimmed rows stay U-locked until this short transaction commits and are not updated. The reads use READPAST, like phase
+            // 2: without it, a read waiting (S) on a clustered row X-locked by a concurrent acknowledgement deadlocked with that
+            // update waiting (X) on the claim-index key this claim holds (measured under READ COMMITTED). A skipped row is either
+            // skipped by phase 2 as well or claimed uncounted, so under contention the budget is approximate (it is a memory bound).
             "IF (SELECT SUM(CAST(DATALENGTH(m.[payload]) AS bigint))\n" +
-            $"    FROM @_claimed AS k INNER JOIN {t} AS m WITH (FORCESEEK) ON m.[sequence] = k.[sequence]) >= @max_payload_bytes\n" +
+            $"    FROM @_claimed AS k INNER JOIN {t} AS m WITH (FORCESEEK, READPAST) ON m.[sequence] = k.[sequence]) >= @max_payload_bytes\n" +
             "    DELETE c FROM @_claimed AS c INNER JOIN (\n" +
             "        SELECT k.[sequence], SUM(CAST(DATALENGTH(m.[payload]) AS bigint)) OVER (ORDER BY m.[available_at], k.[sequence] ROWS UNBOUNDED PRECEDING)\n" +
             "               - DATALENGTH(m.[payload]) AS [before]\n" +
-            $"        FROM @_claimed AS k INNER JOIN {t} AS m WITH (FORCESEEK) ON m.[sequence] = k.[sequence]\n" +
+            $"        FROM @_claimed AS k INNER JOIN {t} AS m WITH (FORCESEEK, READPAST) ON m.[sequence] = k.[sequence]\n" +
             "    ) AS b ON b.[sequence] = c.[sequence]\n" +
             "    WHERE b.[before] >= @max_payload_bytes;\n" +
             "UPDATE m\n" +

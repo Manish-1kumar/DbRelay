@@ -29,10 +29,15 @@
 ## Implementation notes (measured during implementation, 2026-11-22)
 - **Leader/follower group commit, no background thread.** A first version used a background flusher. At concurrency 1 the thread hop
   made dispatching about 30% slower. In the replacement, the first caller to arrive becomes the leader and flushes what is queued
-  on its own task. Under sustained load a leader keeps flushing while acknowledgements keep arriving, so it holds its own
-  delivery slot meanwhile. Its own message is already recorded, but up to `clamp(MaxConcurrency / 4, 1, 4)` slots can be held
-  this way, and the leader's own "delivered" log and activity are delayed until it sees an empty queue. The queue never holds more
-  than MaxConcurrency items and drains when deliveries stop (review finding BA-05, accepted; a bounded hand-off is a follow-up).
+  on its own task.
+- **Leadership is bounded (BA-05, implemented in the 0.2 cycle).** A leader writes at most 4 round trips. Then, if work is still
+  queued, it releases its leader slot and promotes the oldest queued follower, which leads in turn.
+  - Without the bound, a leader under sustained load kept flushing until it saw an empty queue. It held its own delivery slot
+    for the whole burst, and its "delivered" log and activity were delayed with it (measured: one acknowledgement took 4.3 s
+    of a 6.8 s burst). With the bound, every acknowledgement in the same test completed in under 500 ms.
+  - The hand-off order keeps the no-lost-wake-up guarantee. The leader releases first and promotes second, and the promoted
+    follower consumes the promotion before it tries to lead. A stranded follower is caught by a deterministic test that stops
+    all arrivals after the leader's last round.
   Up to four leaders flush concurrently: a single leader serialised round trips and measured 11–40% slower than unbatched
   parallel single-row updates on SQL Server at concurrency 8.
 - **A batch of one uses the provider's single-row statement.** On PostgreSQL, the `unnest` join costs about 0.5 ms more than the
@@ -54,5 +59,5 @@
 ## Consequences
 - Throughput is re-measured in `docs/benchmarks.md`.
 - **Unchanged guarantees:** at-least-once, token-guarded transitions, and the crash-loop bound. A crash after delivery but before a batch flush loses at most the acknowledgements in that batch; those messages are redelivered after their lease expires, as before.
-- A delivery's slot is held until its acknowledgement is recorded. A leader may hold its slot longer while it flushes others' acknowledgements (see the BA-05 note above).
+- A delivery's slot is held until its acknowledgement is recorded. A leader may hold its slot for up to 4 more round trips while it flushes others' acknowledgements, then hands off (BA-05).
 - The public API grows by one SPI interface, one record and one option. That is acceptable pre-1.0 and recorded in CHANGELOG.

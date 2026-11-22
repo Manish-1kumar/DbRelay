@@ -1305,3 +1305,34 @@ All findings above were addressed or accepted. Re-verified on net10.0: unit 104/
 | BA-12 | Low | **Fixed (most).** Added: a multi-item ambiguous commit (a real 2-item batch, asserted); SQL Server chunk tails at 65/129/100 items with a stale tail; duplicate ids with different tokens; the dispatcher's per-message fallback when batched release throws. Not added: a SQL Server lock-behaviour stress test (BA-07 follow-up). | Unit `Shutdown_falls_back_to_per_message_release_when_the_batched_release_fails`; conformance `Batch_acknowledgements_handle_chunk_boundaries` |
 
 **Open Critical/High: none. Open Medium: none.**
+
+## Resolution log: 0.2 engineering backlog (principal architect, 2026-11-22)
+
+Each item was re-run on all four target frameworks. Mutation checks: the fix was reverted temporarily, the new test was confirmed failing, and the fix was restored.
+
+| ID | Resolution | Evidence |
+|---|---|---|
+| T-03 | **Fixed.** A realistic-table plan test asserts the planner's own choices. | `Planner_chooses_the_partial_indexes_on_a_realistic_table` (100k rows; fails against the pre-CR-03 statistics query) |
+| CR-21 | **Fixed without an index.** A `(created_at, id)` index measured +25-28% insert cost. Instead, PostgreSQL sorts only the narrow keys, as SQL Server already does, and `Skip` is capped at 10,000 (ADR 0004). | Conformance paging test; 1M-row measurements in ADR 0004 |
+| CR-18 | **Fixed.** A 64 MiB payload budget per enqueue call and per claim (ADR 0004). | `Claim_stops_at_the_payload_budget_but_always_takes_the_first_message` (mutation-checked on both providers); unit test for the enqueue cap |
+| CR-11 / T-05 | **Resolved as documented behaviour** (see the checklist). Both behaviours are tested, and SQL Server now raises a guiding error. | `Null_transaction_while_a_transaction_is_in_progress_*` (PostgreSQL and SQL Server) |
+| BA-05 | **Fixed.** Leadership is bounded to 4 rounds and then handed off (release first, then promote). | Load test: before the fix, one acknowledgement waited 4.3 s of a 6.8 s burst; after it, every acknowledgement finished within 500 ms. Deterministic hand-off test (fails when the promotion is removed). Throughput A/B against the old batcher and this morning's commit: no regression. |
+| BA-07 | **Stress test added.** It found 3 deadlock cycles, now fixed or documented (below). | `Concurrent_claims_batches_stale_acknowledgements_and_cleanup_never_deadlock`; deadlock graphs from `system_health` |
+| K13 | **Fixed.** Test schemas are timestamped, and stale ones are swept. | Planted stale and fresh schemas, verified end to end |
+
+**BA-07 deadlock findings (SQL Server, RCSI off):**
+
+1. **Batch vs batch.** Each statement held a U lock on one key of `ux_..._id` and waited on the other.
+   - Cause: overlapping stale and current acknowledgements, locked in opposite orders. The plan does not always sort the `VALUES` rows, so the review's "one global order" premise did not hold.
+   - Fix: items are sent in `SqlGuid` order.
+   - Before the fix, 5 of 48 stress runs failed with all three deadlock retries exhausted.
+2. **Claim payload-budget read vs acknowledgement update.** The budget read waited for an S lock on a clustered row while holding a U lock on its claim-index key.
+   - This regression came from the CR-18 change in this cycle.
+   - Fix: `READPAST`, as in claim phase 2.
+3. **Retention cleanup vs a stale batch acknowledgement.** These locks are taken in opposite orders.
+   - This occurs only when `DeliveredRetention` is shorter than the time an acknowledgement can arrive after delivery. The test forced it with a retention of zero.
+   - Documented in `docs/configuration.md`. The statement is retried. A `READPAST` fix was rejected: it could make a current acknowledgement report a false lost lease.
+
+**Results:** 0 failures in 96 stress runs with all fixes. Mutation checks were **inconclusive**. Reproduction depends on machine load: the unfixed code failed 5 of 48 runs at one time and 0 of 48 later. The deadlock graphs are the evidence for cycles 1 and 2.
+
+**Also found:** two 1205 reports from 09:08 UTC came from the BA review harness's explicit-transaction scenario, not from a production path. A targeted repro of duplicate items gave 0 deadlocks in 12,000 parameterized statements.

@@ -184,6 +184,44 @@ public sealed class PostgreSqlProviderTests(PostgreSqlFixture fixture)
         }
     }
 
+    [Fact]
+    public async Task Null_transaction_while_a_transaction_is_in_progress_joins_it()
+    {
+        // CR-11 / T-05: documented provider-specific behaviour. Npgsql runs every command in the connection's current transaction,
+        // so the row commits or rolls back with it (SQL Server instead rejects the call; see the SQL Server provider tests).
+        RequireDatabase();
+        var schema = PostgreSqlTestHelpers.NewSchemaName();
+        await using var sp = Build(relay => relay.UsePostgreSql(fixture.DataSource, pg => pg.Schema = schema));
+        try
+        {
+            await sp.GetRequiredService<IOutboxSchemaManager>().EnsureCreatedAsync(Ct);
+            var outbox = sp.GetRequiredService<IOutbox>();
+            var admin = sp.GetRequiredService<IOutboxAdmin>();
+            await using var connection = await fixture.DataSource.OpenConnectionAsync(Ct);
+
+            Guid rolledBack;
+            await using (var transaction = await connection.BeginTransactionAsync(Ct))
+            {
+                rolledBack = await outbox.EnqueueAsync(connection, null, new TestMessage("rolled back"), cancellationToken: Ct);
+                await transaction.RollbackAsync(Ct);
+            }
+
+            Guid committed;
+            await using (var transaction = await connection.BeginTransactionAsync(Ct))
+            {
+                committed = await outbox.EnqueueAsync(connection, null, new TestMessage("committed"), cancellationToken: Ct);
+                await transaction.CommitAsync(Ct);
+            }
+
+            Assert.Null(await admin.GetAsync(rolledBack, Ct));
+            Assert.NotNull(await admin.GetAsync(committed, Ct));
+        }
+        finally
+        {
+            await PostgreSqlTestHelpers.DropSchemaAsync(fixture.DataSource, schema);
+        }
+    }
+
     // ---- Data source ownership ----------------------------------------------------------------------------------------
 
     [Fact]

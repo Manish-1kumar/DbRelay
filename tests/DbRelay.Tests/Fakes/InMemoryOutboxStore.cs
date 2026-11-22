@@ -15,6 +15,9 @@ public sealed class InMemoryOutboxStore : IOutboxStore, IOutboxBatchStore
     /// <summary>Number of batched "delivered" calls and their sizes (ADR 0003), for asserting that batching happens.</summary>
     public ConcurrentQueue<int> DeliveredBatchSizes { get; } = new();
 
+    /// <summary>Awaited before every multi-item "delivered" batch, to simulate round-trip latency.</summary>
+    public Func<Task>? BeforeBatchDelivered { get; set; }
+
     /// <summary>When set, batched releases throw (to test the dispatcher's per-message fallback).</summary>
     public bool FailBatchRelease { get; set; }
 
@@ -25,6 +28,11 @@ public sealed class InMemoryOutboxStore : IOutboxStore, IOutboxBatchStore
     /// <summary>Batched operations reuse the single-item path, so every failure-injection hook applies to them too.</summary>
     public async Task<IReadOnlyCollection<OutboxAcknowledgement>> MarkDeliveredBatchAsync(IReadOnlyList<OutboxAcknowledgement> items, CancellationToken cancellationToken)
     {
+        if (BeforeBatchDelivered is { } hook)
+        {
+            await hook();
+        }
+
         DeliveredBatchSizes.Enqueue(items.Count);
         var updated = new HashSet<OutboxAcknowledgement>();
         foreach (var item in items)

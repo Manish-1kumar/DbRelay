@@ -413,12 +413,15 @@ internal sealed class PostgreSqlOutboxStore : IOutboxStore, IOutboxBatchStore
             throw new ArgumentOutOfRangeException(nameof(items), items.Count, $"At most {OutboxLimits.MaxClaimBatchSize} items per batch.");
         }
 
-        var ids = new Guid[items.Count];
-        var tokens = new Guid[items.Count];
-        for (var i = 0; i < items.Count; i++)
+        // A canonical item order (defence in depth for BA-07): two batches that touch the same rows then lock them in the same order
+        // whenever the plan follows the input order, so they cannot deadlock on each other.
+        var ordered = items.OrderBy(i => i.MessageId).ThenBy(i => i.LockToken).ToArray();
+        var ids = new Guid[ordered.Length];
+        var tokens = new Guid[ordered.Length];
+        for (var i = 0; i < ordered.Length; i++)
         {
-            ids[i] = items[i].MessageId;
-            tokens[i] = items[i].LockToken;
+            ids[i] = ordered[i].MessageId;
+            tokens[i] = ordered[i].LockToken;
         }
 
         var command = CreateCommand(sql);
