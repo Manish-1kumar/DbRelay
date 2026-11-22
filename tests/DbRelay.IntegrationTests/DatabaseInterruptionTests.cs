@@ -129,11 +129,15 @@ public sealed class DatabaseInterruptionTests(PostgreSqlFixture fixture)
             nameof(Dispatcher_survives_terminated_connections_and_delivers_everything),
             $"messages={ids.Count} deliveries={deliveries.Count} duplicates={deliveries.Count - perMessage.Count} terminatedBackends={terminated} " +
             $"claimFailures={logs.Count(1002)} persistRetries={logs.Count(1008)} persistFailed={logs.Count(1009)} leaseLost={logs.Count(1007)} " +
+            $"ackBatchRetries={logs.Count(1015)} ackBatchFailed={logs.Count(1016)} " +
             $"healthSamples={samples.Length} healthy={samples.Count(s => s.Status == HealthStatus.Healthy)} " +
             $"degraded={samples.Count(s => s.Status == HealthStatus.Degraded)} unhealthy={samples.Count(s => s.Status == HealthStatus.Unhealthy)}");
 
         Assert.True(terminated > 0, "No dispatcher connection was terminated; the test proved nothing.");
-        Assert.True(logs.Count(1002) + logs.Count(1008) + logs.Count(1009) + logs.Count(1012) > 0, "The dispatcher never observed a database failure.");
+        // Delivered acknowledgements go through the batcher (ADR 0003), which logs its own retries (1015) and failures (1016).
+        // Without them, a run whose interruptions all hit acknowledgements rather than claims looked like "no failure observed".
+        var observedFailures = logs.Count(1002) + logs.Count(1008) + logs.Count(1009) + logs.Count(1012) + logs.Count(1015) + logs.Count(1016);
+        Assert.True(observedFailures > 0, "The dispatcher never observed a database failure.");
         Assert.Contains(duringOutage, s => s.Status != HealthStatus.Healthy);
         Assert.Equal(HealthStatus.Healthy, samples[^1].Status);
 
