@@ -3,7 +3,7 @@
 _Last updated: 2026-11-22_
 
 **Phase:** Milestone 14, release candidate ready **pending owner actions** (see RELEASE_CHECKLIST.md).
-Nothing has been committed, pushed or published.
+Pushed to https://github.com/Manish-1kumar/DbRelay (private). Nothing published to NuGet.
 
 | Milestone | Status | Notes |
 |---|---|---|
@@ -18,7 +18,7 @@ Nothing has been committed, pushed or published.
 | M9 Integration, reliability, security | COMPLETED | Integration 76/76; two review passes: 0 Critical, 2 High (fixed), 6 Medium (fixed) |
 | M10 Benchmarks | COMPLETED | `docs/benchmarks.md` |
 | M11 Docs + samples | COMPLETED | README, 9 guides, 3 samples (run against real DBs) |
-| M12 CI + packaging | IMPLEMENTED - NOT VERIFIED | Workflow written; steps verified locally; needs a push (owner approval) to run on GitHub |
+| M12 CI + packaging | COMPLETED | First CI run green on GitHub (1,140/1,140, 0 skipped; PG 15/16/18 jobs green) |
 | M13 Production-readiness audit | COMPLETED | Follow-up audit refuted "no open High" (FU-01); FU-01..FU-10 fixed and re-verified (1,140 test runs, 0 failed); FU-01/FU-04 mutation-checked. No independent re-audit of the FU fixes yet |
 | M14 Release candidate | BLOCKED (owner) | Engineering done; repo URL, push/CI, NuGet prefix, contacts, trademark check need the owner |
 
