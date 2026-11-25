@@ -44,7 +44,7 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 | Enable GitHub private vulnerability reporting | ✅ (2026-11-22) |
 | Package-specific README with absolute links (`src/PACKAGE_README.md`, packed as README.md; 0 relative links verified) | ✅ |
 | Make the repository public | ✅ (2026-11-22). Re-created from a history rewritten to the GitHub no-reply address; the original private repository is kept as `DbRelay-archive` |
-| Tag `v0.1.0`, `dotnet pack -c Release -p:ContinuousIntegrationBuild=true`, publish to NuGet | 🔒 |
+| Tag `v0.1.0` and publish to NuGet (owner approved 2026-11-26) via `.github/workflows/publish.yml`: nuget.org Trusted Publishing, `nuget` environment with required reviewer | ⏳ |
 | Create the GitHub release with CHANGELOG notes | 🔒 |
 
 ## Engineering items carried to 0.2
@@ -61,3 +61,21 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 - ~~**Automated PostgreSQL large-table plan assertion (T-03).**~~ Done: `Planner_chooses_the_partial_indexes_on_a_realistic_table` (100k rows, no `enable_seqscan` override; mutation-checked against the pre-CR-03 statistics query).
 - ~~**Test fixtures that sweep orphaned `t_*` schemas left by killed test processes.**~~ Done (K13).
 - **SQL Server package release; Azure SQL and SQL Server 2019 testing.**
+
+## How to release
+
+1. **Prepare the release commit.** Set `VersionPrefix` in `Directory.Build.props` and date the version in `CHANGELOG.md`. Then wait for CI to be green on `main`.
+2. **Push the tag.** Run `git tag -a vX.Y.Z -m "DbRelay X.Y.Z"` and `git push origin vX.Y.Z`. This starts **Publish to NuGet**:
+   - The `build` job has no publishing rights. It checks that the tag matches the project version, runs the unit tests on all target frameworks, and packs.
+   - The `publish` job then waits for approval.
+3. **Approve the publish.** In GitHub, open Actions > the run > **Review deployments**, and approve the `nuget` environment.
+   - The job exchanges a GitHub OIDC token for a nuget.org API key that is valid for 1 hour. No key is stored anywhere.
+   - It then pushes the `.nupkg` and `.snupkg` files.
+4. **One-time nuget.org setup:** a Trusted Publishing policy with these values:
+   - **Repository Owner** `Manish-1kumar`;
+   - **Repository** `DbRelay`;
+   - **Workflow File** `publish.yml`;
+   - **Environment** `nuget`;
+   - **Scope** "Push new packages and package versions";
+   - **Glob** `DbRelay*`.
+

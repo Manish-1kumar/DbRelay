@@ -1,0 +1,98 @@
+name: Publish to NuGet
+
+# Runs when a release tag (v1.2.3) is pushed. Publishing uses nuget.org Trusted Publishing: the job exchanges a GitHub OIDC
+# token for a NuGet API key that is valid for 1 hour. No API key is stored in the repository or its secrets.
+# The publish job runs in the "nuget" environment, which requires a maintainer's approval in the GitHub UI.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  build:
+    name: Build, unit test, pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+            11.0.x
+
+      - name: Check that the tag matches the project version
+        run: |
+          version=$(dotnet msbuild src/DbRelay/DbRelay.csproj -getProperty:Version)
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match the project version ${version}."; exit 1
+          fi
+          echo "Publishing version ${version}"
+
+      - name: Restore
+        run: dotnet restore DbRelay.slnx
+
+      - name: Build
+        run: dotnet build DbRelay.slnx -c Release --no-restore -p:ContinuousIntegrationBuild=true
+
+      # The full database suites already ran in CI for this commit. The unit tests run again here as a final guard.
+      - name: Unit tests (all target frameworks)
+        run: dotnet test --project tests/DbRelay.Tests -c Release --no-build
+
+      - name: Pack
+        run: dotnet pack DbRelay.slnx -c Release --no-build -p:ContinuousIntegrationBuild=true -o artifacts
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nuget-packages
+          path: artifacts/*nupkg
+          if-no-files-found: error
+
+  publish:
+    name: Publish to nuget.org
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: nuget
+    permissions:
+      id-token: write # GitHub OIDC token for nuget.org Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: nuget-packages
+          path: artifacts
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 11.0.x
+
+      - name: List packages
+        run: ls -l artifacts
+
+      # Exchange the OIDC token for a temporary API key, shortly before pushing.
+      - name: NuGet login (OIDC -> temporary API key)
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: Manish-1kumar # nuget.org profile name
+
+      # Symbol packages (.snupkg) next to each .nupkg are pushed with it.
+      - name: Push to nuget.org
+        run: >-
+          dotnet nuget push "artifacts/*.nupkg"
+          --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
