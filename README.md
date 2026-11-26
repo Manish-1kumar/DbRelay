@@ -365,8 +365,8 @@ the dispatcher is not running, its last polls failed, or it has made no progress
 - **At-least-once only**, with **no ordering** guarantee. Per-key ordering is on the roadmap.
 - **One delivery handler per application.**
 - **Polling.** Latency is bounded by `PollingInterval` (default 1 s). There are no LISTEN/NOTIFY wake-ups yet.
-- **Tested on PostgreSQL 17.5 and SQL Server 2022 Express (Windows) only.** PostgreSQL 15/16/18, SQL Server 2019 and Azure SQL are
-  supported targets but have not been tested yet.
+- **Tested on PostgreSQL 15, 16, 17 and 18 and on SQL Server 2019, 2022 and 2025.** Azure SQL Database is not tested yet
+  ([K7](KNOWN_ISSUES.md)).
 - **SQL Server index hints.** DbRelay's statements name its indexes, so they **fail** (rather than slow down) if a DBA drops one
   (ADR 0002).
 - **SQL Server: `EnqueueManyAsync` without a transaction and with more than 200 messages** begins its own transaction on your

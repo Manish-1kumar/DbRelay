@@ -46,9 +46,35 @@ Provider, conformance and integration tests run against **real databases**. Each
 
 Tests create their own uniquely named schemas (for example `t_<hex>` and `it_<hex>`) and drop them afterwards, so they can share a
 database. The SQL Server suite runs the conformance tests twice, with `READ_COMMITTED_SNAPSHOT` off and on. It uses a second
-database for the RCSI-on run, so the login needs permission to create databases.
+database for the RCSI-on run (`<database>_rcsi`). On a local server the fixture creates both databases, so the login needs permission
+to create databases; on Azure SQL you create them yourself (below).
 
 **Skipped is not passed.** If database tests were skipped, say so in your pull request.
+
+#### Azure SQL Database (free offer)
+
+The SQL Server suite can run against Azure SQL Database. On Azure SQL (detected by `SERVERPROPERTY('EngineEdition') = 5`) the
+fixture **never creates or alters databases**: a database made with `CREATE DATABASE` is not covered by the
+[free offer](https://learn.microsoft.com/azure/azure-sql/database/free-offer) and is billed. It uses only the two databases you
+create, and skips a run whose database is missing or set up wrong, with the fix as the reason.
+
+1. In the Azure portal, create a SQL database named `dbrelay_tests`, and select **Start free** in the **Create a database** pane.
+   - When the free limit is reached, the database should **auto-pause until next month**. With the CLI, this is
+     `az sql db create ... --use-free-limit true --free-limit-exhaustion-behavior AutoPause`. Never choose "continue using the
+     database for additional charges": you can't switch back.
+   - Create a new logical server with SQL authentication.
+   - Under **Networking**, allow your current client IP address.
+2. Create a second free database named `dbrelay_tests_rcsi` on the same server. It keeps Azure's default,
+   `READ_COMMITTED_SNAPSHOT ON`.
+3. Connect to the server's `master` database, with no other connections open to `dbrelay_tests`, and run:
+   `ALTER DATABASE [dbrelay_tests] SET READ_COMMITTED_SNAPSHOT OFF;`
+4. Set `DBRELAY_TEST_SQLSERVER` to
+   `Server=tcp:<server>.database.windows.net,1433;Database=dbrelay_tests;User ID=<login>;Password=<password>;Encrypt=true`.
+   Keep the password out of files you commit.
+5. Run one target framework to save free compute: `dotnet test --project tests/DbRelay.SqlServer.Tests -c Release -f net10.0`.
+
+A free database uses its monthly allowance (100,000 vCore seconds) while it is online, including the 15 idle minutes before it
+pauses. An open SSMS, Query editor or VS Code connection keeps it online. Do not run the soak harness or benchmarks against it.
 
 ### Test projects
 

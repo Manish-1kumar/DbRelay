@@ -1,7 +1,10 @@
 # SQL Server guide
 
-Supported: SQL Server 2019 and later, and Azure SQL Database. **Tested: SQL Server 2022 Express (16.0.1000.6) on Windows only**
-(K7); 2019 and Azure SQL are not tested yet. Provider: `DbRelay.SqlServer`, built on Microsoft.Data.SqlClient.
+Supported: SQL Server 2019 and later. **Tested** with and without `READ_COMMITTED_SNAPSHOT`: SQL Server 2019 (15.0.4510)
+and 2025 (17.0.5065) in Linux containers in CI, and 2022 both in CI and as Express (16.0.1000.6) on Windows.
+**Azure SQL Database is not tested** (K7). It should work, because DbRelay uses only features that Azure SQL also has and
+works with RCSI, which Azure SQL turns on by default. Please report any problem you find there. Provider: `DbRelay.SqlServer`,
+built on Microsoft.Data.SqlClient.
 
 ## Schema
 

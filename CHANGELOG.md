@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `UseSqlServer(connectionString, ...)`, `UseSqlServer(Func<IServiceProvider, SqlConnection>, ...)` and
   `SqlServerOutboxOptions`. It depends on Microsoft.Data.SqlClient 7.1.2 or later.
 - CI runs the SQL Server provider suite on SQL Server 2019 and 2025 as well as 2022, with and without
-  `READ_COMMITTED_SNAPSHOT`.
+  `READ_COMMITTED_SNAPSHOT`. Azure SQL Database is still not tested (K7).
 
 ### Changed
 
