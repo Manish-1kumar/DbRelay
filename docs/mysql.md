@@ -51,6 +51,8 @@ connection each time; DbRelay opens and disposes it.
   - DDL commits implicitly, so DbRelay always runs it on its own connection, never yours.
 - **Tables** are InnoDB with `utf8mb4` and the `utf8mb4_bin` collation, so any Unicode text is stored and message types compare
   exactly.
+- **Table names are at most 58 characters.** MySQL names the table's CHECK constraint `<table>_chk_1`, within its
+  64-character limit.
 
 ### Indexes
 
@@ -79,7 +81,8 @@ The provider test `Claim_cleanup_dead_letter_and_statistics_plans_use_the_genera
   - The default limit is 64 MiB on MySQL 8 and 16 MiB on MariaDB.
   - A call that could come close is checked against the server's limit **before** it is sent. It is rejected with an
     explanation, and your connection and transaction stay intact.
-  - The check is conservative (it counts every payload byte twice), so split the work into several calls, or raise the limit.
+  - The check counts the bytes as they are sent, including MySQL escaping, so it rejects only calls that really could exceed
+    the limit. Split the work into several calls, or raise the limit.
 - **With no `Schema` configured, enqueue on a connection to DbRelay's database.** An unqualified table resolves to the
   connection's current database. If yours differs from the one in DbRelay's connection string, the enqueue is rejected,
   rather than storing messages the dispatcher never sees.
