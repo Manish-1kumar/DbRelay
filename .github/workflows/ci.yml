@@ -17,8 +17,9 @@ env:
   DOTNET_NOLOGO: "1"
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
   NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
-  # Ephemeral CI-only container credential; not a secret.
+  # Ephemeral CI-only container credentials; not secrets.
   MSSQL_SA_PASSWORD: "DbRelay_CI_Pa55w0rd!"
+  ORACLE_PASSWORD: "DbRelay_CI_Pa55w0rd"
 
 jobs:
   build-test:
@@ -46,10 +47,20 @@ jobs:
         options: >-
           --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' -b"
           --health-interval 10s --health-timeout 5s --health-retries 30
+      # Oracle Database 23ai Free (gvenzl images: https://github.com/gvenzl/oci-oracle-free). Tests connect as SYSTEM because each
+      # test creates its own schema, which in Oracle is a user.
+      oracle:
+        image: gvenzl/oracle-free:23-slim-faststart
+        env:
+          ORACLE_PASSWORD: ${{ env.ORACLE_PASSWORD }}
+        ports: ["1521:1521"]
+        options: >-
+          --health-cmd healthcheck.sh --health-interval 10s --health-timeout 5s --health-retries 60
 
     env:
       DBRELAY_TEST_POSTGRES: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=dbrelay_tests;Include Error Detail=true"
       DBRELAY_TEST_SQLSERVER: "Server=localhost,1433;User ID=sa;Password=DbRelay_CI_Pa55w0rd!;TrustServerCertificate=true;Database=dbrelay_tests"
+      DBRELAY_TEST_ORACLE: "User Id=system;Password=DbRelay_CI_Pa55w0rd;Data Source=localhost:1521/FREEPDB1"
 
     steps:
       - uses: actions/checkout@v7
@@ -185,3 +196,40 @@ jobs:
             -Q "IF DB_ID('dbrelay_tests') IS NULL CREATE DATABASE dbrelay_tests; SELECT @@VERSION;"
       - name: SQL Server provider tests (net10.0)
         run: dotnet test --project tests/DbRelay.SqlServer.Tests -c Release -f net10.0
+
+  # Oracle 23ai Free runs in build-test. 21c XE is the oldest Oracle version with a free container image.
+  oracle-compat:
+    name: Oracle ${{ matrix.oracle.name }} compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        oracle:
+          - { name: "21c XE", image: "gvenzl/oracle-xe:21-slim-faststart", service: "XEPDB1" }
+    services:
+      oracle:
+        image: ${{ matrix.oracle.image }}
+        env:
+          ORACLE_PASSWORD: ${{ env.ORACLE_PASSWORD }}
+        ports: ["1521:1521"]
+        options: >-
+          --health-cmd healthcheck.sh --health-interval 10s --health-timeout 5s --health-retries 60
+    env:
+      DBRELAY_TEST_ORACLE: "User Id=system;Password=DbRelay_CI_Pa55w0rd;Data Source=localhost:1521/${{ matrix.oracle.service }}"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            10.0.x
+            11.0.x
+      - uses: actions/cache@v6
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', '**/*.csproj', 'global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+      - name: Record the Oracle version
+        run: docker exec ${{ job.services.oracle.id }} bash -c "echo 'SELECT BANNER_FULL FROM V\$VERSION;' | sqlplus -s system/$ORACLE_PASSWORD@localhost:1521/${{ matrix.oracle.service }}" || true
+      - name: Oracle provider tests (net10.0)
+        run: dotnet test --project tests/DbRelay.Oracle.Tests -c Release -f net10.0

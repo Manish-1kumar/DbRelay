@@ -4,12 +4,14 @@
     <Project Path="src/DbRelay/DbRelay.csproj" />
     <Project Path="src/DbRelay.PostgreSql/DbRelay.PostgreSql.csproj" />
     <Project Path="src/DbRelay.SqlServer/DbRelay.SqlServer.csproj" />
+    <Project Path="src/DbRelay.Oracle/DbRelay.Oracle.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/DbRelay.Storage.Conformance/DbRelay.Storage.Conformance.csproj" />
     <Project Path="tests/DbRelay.Tests/DbRelay.Tests.csproj" />
     <Project Path="tests/DbRelay.PostgreSql.Tests/DbRelay.PostgreSql.Tests.csproj" />
     <Project Path="tests/DbRelay.SqlServer.Tests/DbRelay.SqlServer.Tests.csproj" />
+    <Project Path="tests/DbRelay.Oracle.Tests/DbRelay.Oracle.Tests.csproj" />
     <Project Path="tests/DbRelay.IntegrationTests/DbRelay.IntegrationTests.csproj" />
     <Project Path="tests/DbRelay.CrashWorker/DbRelay.CrashWorker.csproj" />
     <Project Path="tests/DbRelay.Soak/DbRelay.Soak.csproj" />
