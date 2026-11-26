@@ -59,7 +59,7 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
     public Task InsertAsync(DbConnection connection, DbTransaction? transaction, IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
     {
         ValidateCallerResources(connection, transaction);
-        ArgumentNullException.ThrowIfNull(records);
+        ValidateBatch(records);
 
         // Exactly the caller's connection; DbRelay never opens, closes, commits, rolls back or disposes it. ODP.NET runs every
         // command on a connection in that connection's transaction, if it has one, so the rows commit or roll back with it.
@@ -78,9 +78,22 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
         }
     }
 
-    public Task InsertStandaloneAsync(IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
+    /// <summary>
+    /// One call is one atomic statement, so the storage interface accepts at most <see cref="OutboxLimits.MaxEnqueueBatchSize"/>
+    /// records per call; DbRelay's own enqueue API never sends more (MY-14, applied to Oracle too).
+    /// </summary>
+    private static void ValidateBatch(IReadOnlyList<OutboxRecord> records)
     {
         ArgumentNullException.ThrowIfNull(records);
+        if (records.Count > OutboxLimits.MaxEnqueueBatchSize)
+        {
+            throw new ArgumentOutOfRangeException(nameof(records), records.Count, $"At most {OutboxLimits.MaxEnqueueBatchSize} records per insert.");
+        }
+    }
+
+    public Task InsertStandaloneAsync(IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
+    {
+        ValidateBatch(records);
         return _connections.ExecuteAsync(
             async (connection, ct) =>
             {
