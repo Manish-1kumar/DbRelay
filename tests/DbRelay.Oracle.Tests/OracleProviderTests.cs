@@ -154,6 +154,16 @@ public sealed class OracleProviderTests(OracleFixture fixture)
     }
 
     [Fact]
+    public async Task The_storage_interface_rejects_more_than_the_enqueue_limit_in_one_call()
+    {
+        // MY-14, applied to Oracle: one call is one atomic statement, so at most 1,000 records. Rejected before any connection opens.
+        await using var services = Build(relay => relay.UseOracle(AnyConnectionString, o => o.Schema = "s"));
+        var store = services.GetRequiredService<IOutboxStore>();
+        var records = Enumerable.Range(0, OutboxLimits.MaxEnqueueBatchSize + 1).Select(_ => Record()).ToList();
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.InsertStandaloneAsync(records, Ct));
+    }
+
+    [Fact]
     public void The_claim_order_of_a_full_batch_fits_the_PLSQL_output_string()
     {
         // The claim returns 32 hex digits per claimed ID in one VARCHAR2(32767) output parameter.
