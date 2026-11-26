@@ -30,7 +30,7 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 | 19 | CI passes | ✅ | Latest GitHub Actions run (ubuntu, service containers) green: 1,280/1,280 tests, 0 skipped; PostgreSQL 15/16/18 compatibility jobs green. Run 45025481068 (first green run: 44996266454, 1,140 tests) |
 | 20 | NuGet packages build and pass validation | ✅ | `dotnet pack` → 3 packages + symbols; contents and dependency groups inspected; package validation enabled |
 | 21 | No unresolved Critical/High findings | ✅ | Initial review: 1 High (CR-01). Follow-up audit found it partly fixed (FU-01, High) plus 1 Medium. Both fixed; FU-01 and FU-04 fixes mutation-checked. The FU fixes have not had an independent re-audit |
-| 22 | Release checklist complete | ⏳ | This file; the open items below |
+| 22 | Release checklist complete | ✅ | This file. Only the optional owner items below remain (prefix reservation, trademark search) |
 
 ## Before publishing (owner actions)
 
@@ -45,7 +45,7 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 | Package-specific README with absolute links (`src/PACKAGE_README.md`, packed as README.md; 0 relative links verified) | ✅ |
 | Make the repository public | ✅ (2026-11-22). Re-created from a history rewritten to the GitHub no-reply address; the original private repository is kept as `DbRelay-archive` |
 | Tag `v0.1.0` and publish to NuGet (owner approved 2026-11-26) via `.github/workflows/publish.yml`: nuget.org Trusted Publishing, `nuget` environment with required reviewer | ✅ (2026-11-26). Run 45692836402: 3 packages + 3 symbol packages pushed; installed from nuget.org in a fresh app |
-| Create the GitHub release with CHANGELOG notes | 🔒 |
+| Create the GitHub release with CHANGELOG notes | ✅ (2026-11-26) https://github.com/Manish-1kumar/DbRelay/releases/tag/v0.1.0 |
 
 ## Engineering items carried to 0.2
 
