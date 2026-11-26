@@ -134,7 +134,23 @@ public sealed class OracleProviderTests(OracleFixture fixture)
         var largest = sql.GetInsert(OracleOutboxSql.MaxInsertRowsPerStatement);
         Assert.StartsWith("INSERT ALL", largest, StringComparison.Ordinal);
         Assert.True(OracleOutboxSql.MaxInsertRowsPerStatement * 10 <= 999, "Oracle allows at most 999 columns across INSERT ALL clauses.");
-        Assert.Throws<ArgumentOutOfRangeException>(() => sql.GetInsert(OracleOutboxSql.MaxInsertRowsPerStatement + 1));
+
+        // More rows: one PL/SQL block of INSERT ALL statements, which Oracle runs (and rolls back) as one statement.
+        var block = sql.GetInsert(OracleOutboxSql.MaxInsertRowsPerStatement + 1);
+        Assert.StartsWith("BEGIN\nINSERT ALL", block, StringComparison.Ordinal);
+        Assert.EndsWith(";\nEND;", block, StringComparison.Ordinal);
+        Assert.Contains($":id{OracleOutboxSql.MaxInsertRowsPerStatement}, ", block, StringComparison.Ordinal);
+        Assert.Throws<ArgumentOutOfRangeException>(() => sql.GetInsert(OutboxLimits.MaxEnqueueBatchSize + 1));
+    }
+
+    [Fact]
+    public void Claimed_rows_are_read_in_buckets_that_cover_every_batch_size()
+    {
+        Assert.Equal(1, OracleOutboxSql.ClaimedRowBucketFor(1));
+        Assert.Equal(128, OracleOutboxSql.ClaimedRowBucketFor(100));
+        Assert.Equal(OutboxLimits.MaxClaimBatchSize, OracleOutboxSql.ClaimedRowBucketFor(OutboxLimits.MaxClaimBatchSize));
+        var sql = new OracleOutboxSql(null, "outbox_messages");
+        Assert.EndsWith(":i0, :i1, :i2, :i3)", sql.GetClaimedRows(4), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -296,7 +312,7 @@ public sealed class OracleProviderTests(OracleFixture fixture)
             Assert.Null(await admin.GetAsync(rolledBack, Ct));
             Assert.NotNull(await admin.GetAsync(committed, Ct));
 
-            // Several statements (more than one INSERT ALL) without a caller transaction, on a connection that has one: they join it.
+            // A block of several INSERT ALL statements without a caller transaction, on a connection that has one: it joins it.
             IReadOnlyList<Guid> many;
             await using (var transaction = await connection.BeginTransactionAsync(Ct))
             {
@@ -315,7 +331,7 @@ public sealed class OracleProviderTests(OracleFixture fixture)
 
     [Theory]
     [InlineData(10, 5)] // one INSERT ALL statement
-    [InlineData(200, 150)] // three statements in a transaction DbRelay begins itself
+    [InlineData(200, 150)] // one PL/SQL block of three INSERT ALL statements
     public async Task Multi_row_insert_without_a_transaction_is_all_or_nothing(int count, int duplicateAt)
     {
         RequireDatabase();

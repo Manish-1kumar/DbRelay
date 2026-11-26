@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
+using DbRelay.Storage;
 
 namespace DbRelay.Oracle.Internal;
 
@@ -49,6 +50,7 @@ internal sealed class OracleOutboxSql
     ];
 
     private readonly ConcurrentDictionary<int, string> _inserts = new();
+    private readonly ConcurrentDictionary<int, string> _claimedRows = new();
     private readonly string _columns;
 
     public OracleOutboxSql(string? schema, string tableName)
@@ -83,8 +85,10 @@ internal sealed class OracleOutboxSql
         // (an explicit FETCH, not a cursor FOR loop, which PL/SQL would bulk-fetch 100 rows at a time and so lock rows it does not
         // claim). FETCH FIRST and ROWNUM cannot be combined with SKIP LOCKED: they limit the rows before locked ones are skipped.
         // ADR 0004 payload budget: a row is claimed only while the payloads claimed before it total less than :max_payload_bytes,
-        // so the first row is always claimed. Every claimed row gets the same AVAILABLE_AT (v_until), so the result cursor finds
-        // exactly those rows through the claim index. :claimed_ids returns the claim order (32 hex digits per ID).
+        // so the first row is always claimed. :claimed_ids returns the claimed IDs in claim order (32 hex digits per ID); the store
+        // then reads those rows with GetClaimedRows (OR-11). :pause_ms is a test seam (zero in production): it holds the cursor
+        // open between choosing the candidates and locking them, so a test can change a row in that gap (OR-01). DBMS_SESSION is
+        // reached through EXECUTE IMMEDIATE, so the block compiles even where its EXECUTE privilege has been revoked.
         Claim =
             $"""
             DECLARE
@@ -101,6 +105,9 @@ internal sealed class OracleOutboxSql
             BEGIN
                 v_until := v_now + NUMTODSINTERVAL(:lease_ms / 1000, 'SECOND');
                 OPEN c_due;
+                IF :pause_ms > 0 THEN
+                    EXECUTE IMMEDIATE 'BEGIN DBMS_SESSION.SLEEP(:s); END;' USING :pause_ms / 1000;
+                END IF;
                 LOOP
                     FETCH c_due INTO v_rid, v_id, v_size;
                     EXIT WHEN c_due%NOTFOUND;
@@ -121,9 +128,6 @@ internal sealed class OracleOutboxSql
                 END LOOP;
                 CLOSE c_due;
                 :claimed_ids := v_ids;
-                OPEN :claimed FOR
-                    SELECT {Hint("INDEX", ClaimIndexName)} {_columns} FROM {table} t
-                    WHERE {ClaimKey} = v_until AND LOCK_TOKEN = :lock_token;
             END;
             """;
 
@@ -192,7 +196,18 @@ internal sealed class OracleOutboxSql
         RequeueDeadLettered = RequeueMany(table, filterByType: false);
         RequeueDeadLetteredOfType = RequeueMany(table, filterByType: true);
 
-        HealthCheck = $"SELECT 1 FROM {table} WHERE ROWNUM = 1";
+        // OR-12: the table must answer, and its three function-based indexes must exist and be usable. Oracle ignores a hint whose
+        // index is missing or unusable, so DbRelay would otherwise keep working with full table scans, slower by orders of magnitude.
+        var owner = Schema is null ? "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')" : "'" + Schema + "'";
+        HealthCheck =
+            $"""
+            SELECT (SELECT COUNT(*) FROM {table} WHERE ROWNUM = 1),
+                   (SELECT COUNT(*) FROM ALL_INDEXES
+                    WHERE OWNER = {owner} AND TABLE_NAME = '{TableName}'
+                      AND INDEX_NAME IN ('{ClaimIndexName}', '{CleanupIndexName}', '{DeadIndexName}')
+                      AND STATUS = 'VALID' AND (FUNCIDX_STATUS IS NULL OR FUNCIDX_STATUS = 'ENABLED'))
+            FROM DUAL
+            """;
     }
 
     public string? Schema { get; }
@@ -251,16 +266,52 @@ internal sealed class OracleOutboxSql
     public string HealthCheck { get; }
 
     /// <summary>
-    /// A statement inserting <paramref name="rows"/> rows (1 to <see cref="MaxInsertRowsPerStatement"/>), with parameters
+    /// The statement inserting <paramref name="rows"/> rows (1 to <see cref="OutboxLimits.MaxEnqueueBatchSize"/>), with parameters
     /// <c>:id{i}</c>, <c>:mt{i}</c>, <c>:de{i}</c>, <c>:pl{i}</c>, <c>:ct{i}</c>, <c>:hd{i}</c>, <c>:co{i}</c>, <c>:ca{i}</c>,
-    /// <c>:da{i}</c> and <c>:dl{i}</c>. Several rows use one <c>INSERT ALL</c>, so they are stored all-or-nothing as one statement.
+    /// <c>:da{i}</c> and <c>:dl{i}</c>, always stored all-or-nothing:
+    /// <list type="bullet">
+    /// <item>up to <see cref="MaxInsertRowsPerStatement"/> rows: one <c>INSERT ALL</c> statement (cached by row count);</item>
+    /// <item>more: one anonymous PL/SQL block of <c>INSERT ALL</c> statements. Oracle runs a block called from the client as one
+    /// statement, so an error rolls back everything it inserted (OR-04). DbRelay never needs to begin a transaction on the caller's
+    /// connection, and a failed call never leaves part of its rows in the caller's transaction.</item>
+    /// </list>
     /// </summary>
     public string GetInsert(int rows)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(rows, 1);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan(rows, MaxInsertRowsPerStatement);
-        return _inserts.GetOrAdd(rows, BuildInsert);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(rows, OutboxLimits.MaxEnqueueBatchSize);
+        if (rows <= MaxInsertRowsPerStatement)
+        {
+            return _inserts.GetOrAdd(rows, static (count, sql) => sql.BuildInsertAll(0, count), this);
+        }
+
+        // Not cached: a block for 1,000 rows is about 300 KB of text, and its parse cost is small next to sending the rows.
+        var block = new StringBuilder("BEGIN\n");
+        for (var start = 0; start < rows; start += MaxInsertRowsPerStatement)
+        {
+            block.Append(BuildInsertAll(start, Math.Min(MaxInsertRowsPerStatement, rows - start))).Append(";\n");
+        }
+
+        return block.Append("END;").ToString();
     }
+
+    /// <summary>Claimed rows are read in buckets of these sizes, padded by repeating the last ID, so few statement texts exist.</summary>
+    internal static readonly int[] ClaimedRowBuckets = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, OutboxLimits.MaxClaimBatchSize];
+
+    /// <summary>
+    /// Reads the rows a claim just leased, by primary key, with parameters <c>:i0</c> to <c>:i{bucket - 1}</c>. A plain query on a
+    /// DbRelay command, so the payloads and texts come back inline with the rows (<c>InitialLOBFetchSize = -1</c>), not one round trip
+    /// per LOB (OR-11).
+    /// </summary>
+    public string GetClaimedRows(int bucket) =>
+        _claimedRows.GetOrAdd(
+            bucket,
+            static (size, sql) =>
+                $"SELECT {sql._columns} FROM {sql.Table} WHERE ID IN ({string.Join(", ", Enumerable.Range(0, size).Select(i => ":i" + i.ToString(CultureInfo.InvariantCulture)))})",
+            this);
+
+    /// <summary>The smallest bucket of <see cref="ClaimedRowBuckets"/> that holds <paramref name="count"/> IDs.</summary>
+    internal static int ClaimedRowBucketFor(int count) => ClaimedRowBuckets.First(b => b >= count);
 
     /// <summary>
     /// The admin page query: the narrow keys are filtered, sorted and paged first, then the page's full rows are fetched by primary
@@ -293,7 +344,8 @@ internal sealed class OracleOutboxSql
 
     private static string Quote(string identifier) => "\"" + identifier + "\"";
 
-    private string BuildInsert(int rows)
+    /// <summary>One statement inserting rows <paramref name="start"/> to <paramref name="start"/> + <paramref name="count"/> - 1.</summary>
+    private string BuildInsertAll(int start, int count)
     {
         const string Columns = "(ID, MESSAGE_TYPE, DESTINATION, PAYLOAD, CONTENT_TYPE, HEADERS, CORRELATION_ID, CAUSATION_ID, SCHEDULED_AT, AVAILABLE_AT)";
         static string Values(int i)
@@ -304,13 +356,13 @@ internal sealed class OracleOutboxSql
             return $"VALUES (:id{i}, :mt{i}, :de{i}, NVL(:pl{i}, EMPTY_BLOB()), :ct{i}, :hd{i}, :co{i}, :ca{i}, {due}, {due})";
         }
 
-        if (rows == 1)
+        if (count == 1)
         {
-            return $"INSERT INTO {Table} {Columns} {Values(0)}";
+            return $"INSERT INTO {Table} {Columns} {Values(start)}";
         }
 
         var sql = new StringBuilder("INSERT ALL");
-        for (var i = 0; i < rows; i++)
+        for (var i = start; i < start + count; i++)
         {
             sql.Append('\n').Append("  INTO ").Append(Table).Append(' ').Append(Columns).Append(' ').Append(Values(i));
         }

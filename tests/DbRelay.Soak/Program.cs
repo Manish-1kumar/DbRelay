@@ -1,7 +1,7 @@
 using System.Globalization;
 using DbRelay.Soak;
 
-// coordinator --provider <PostgreSql|SqlServer> [--minutes 120] [--workers 3] [--rate 40] [--report soak.md] [--keep]
+// coordinator --provider <PostgreSql|SqlServer|Oracle> [--minutes 120] [--workers 3] [--rate 40] [--report soak.md] [--keep]
 // worker <provider> <schema> <name> <stopFile>        (started by the coordinator)
 if (args.Length > 0 && args[0] == "worker")
 {
@@ -24,5 +24,5 @@ if (args.Length > 0 && args[0] == "coordinator")
     return await Coordinator.RunAsync(provider, TimeSpan.FromMinutes(minutes), workers, report, rate, keep: args.Contains("--keep"));
 }
 
-Console.WriteLine("Usage: coordinator --provider PostgreSql|SqlServer [--minutes 120] [--workers 3] [--rate 40] [--report soak.md] [--keep]");
+Console.WriteLine("Usage: coordinator --provider PostgreSql|SqlServer|Oracle [--minutes 120] [--workers 3] [--rate 40] [--report soak.md] [--keep]");
 return 2;

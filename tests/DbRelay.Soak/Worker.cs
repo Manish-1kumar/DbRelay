@@ -47,7 +47,7 @@ public static class Worker
 
                 await using (var connection = await db.OpenAsync(appName, ct))
                 {
-                    await connection.ExecuteAsync(db.InsertSinkSql, new { Id = message.Id, message.Attempt, Worker = workerName });
+                    await connection.ExecuteAsync(db.InsertSinkSql, new { Id = db.Id(message.Id), message.Attempt, Worker = workerName });
                 }
 
                 return DeliveryResult.Delivered();

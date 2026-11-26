@@ -30,6 +30,12 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
     /// <summary>ORA-00060 victims retried by this store (see <see cref="OracleConnectionSource.ExecuteAsync{T}"/>).</summary>
     internal long DeadlockRetries => _connections.DeadlockRetries;
 
+    /// <summary>
+    /// Test seam (OR-01): how long the claim holds its cursor open between choosing candidate rows and locking them. Always zero in
+    /// production; tests set it to change a row inside that gap.
+    /// </summary>
+    internal TimeSpan ClaimTestPause { get; set; }
+
     // ---- Enqueue ---------------------------------------------------------------------------------------------------
 
     public void ValidateCallerResources(DbConnection connection, DbTransaction? transaction)
@@ -57,15 +63,14 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
 
         // Exactly the caller's connection; DbRelay never opens, closes, commits, rolls back or disposes it. ODP.NET runs every
         // command on a connection in that connection's transaction, if it has one, so the rows commit or roll back with it.
-        return InsertOnCallerConnectionAsync((OracleConnection)connection, transaction is not null, records, cancellationToken);
+        return InsertOnCallerConnectionAsync((OracleConnection)connection, records, cancellationToken);
     }
 
-    private async Task InsertOnCallerConnectionAsync(
-        OracleConnection connection, bool hasTransaction, IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
+    private async Task InsertOnCallerConnectionAsync(OracleConnection connection, IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
     {
         try
         {
-            await InsertCoreAsync(connection, hasTransaction, records, cancellationToken).ConfigureAwait(false);
+            await InsertCoreAsync(connection, records, cancellationToken).ConfigureAwait(false);
         }
         catch (OracleException ex) when (cancellationToken.IsCancellationRequested)
         {
@@ -79,55 +84,23 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
         return _connections.ExecuteAsync(
             async (connection, ct) =>
             {
-                await InsertCoreAsync(connection, hasTransaction: false, records, ct).ConfigureAwait(false);
+                await InsertCoreAsync(connection, records, ct).ConfigureAwait(false);
                 return true;
             },
             cancellationToken);
     }
 
     /// <summary>
-    /// Inserts in statements of at most <see cref="OracleOutboxSql.MaxInsertRowsPerStatement"/> rows. One statement is atomic on its
-    /// own. When several are needed and there is no caller transaction, they run in a transaction DbRelay begins and commits itself,
-    /// so that the call stays all-or-nothing. If the connection already has a transaction that the caller did not pass (ODP.NET then
-    /// refuses a second one), the statements run in that transaction and commit or roll back with it.
+    /// Inserts with one statement per <see cref="OutboxLimits.MaxEnqueueBatchSize"/> rows: an <c>INSERT ALL</c>, or a PL/SQL block of them
+    /// (see <see cref="OracleOutboxSql.GetInsert"/>). Each statement is atomic on its own, so DbRelay never begins, commits or rolls
+    /// back a transaction. DbRelay limits one enqueue call to <see cref="OutboxLimits.MaxEnqueueBatchSize"/> messages, so a call is one
+    /// statement.
     /// </summary>
-    private async Task InsertCoreAsync(OracleConnection connection, bool hasTransaction, IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
+    private async Task InsertCoreAsync(OracleConnection connection, IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
     {
-        if (records.Count == 0)
+        for (var start = 0; start < records.Count; start += OutboxLimits.MaxEnqueueBatchSize)
         {
-            return;
-        }
-
-        if (records.Count <= OracleOutboxSql.MaxInsertRowsPerStatement || hasTransaction)
-        {
-            await InsertChunksAsync(connection, records, cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
-        OracleTransaction own;
-        try
-        {
-            own = connection.BeginTransaction();
-        }
-        catch (InvalidOperationException)
-        {
-            // The connection is already in a local or distributed transaction: the statements join it.
-            await InsertChunksAsync(connection, records, cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
-        await using (own.ConfigureAwait(false))
-        {
-            await InsertChunksAsync(connection, records, cancellationToken).ConfigureAwait(false);
-            await own.CommitAsync(cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    private async Task InsertChunksAsync(OracleConnection connection, IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
-    {
-        for (var start = 0; start < records.Count; start += OracleOutboxSql.MaxInsertRowsPerStatement)
-        {
-            var count = Math.Min(OracleOutboxSql.MaxInsertRowsPerStatement, records.Count - start);
+            var count = Math.Min(OutboxLimits.MaxEnqueueBatchSize, records.Count - start);
             var command = _connections.CreateCommand(connection, _sql.GetInsert(count));
             await using (command.ConfigureAwait(false))
             {
@@ -184,7 +157,7 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
                 {
                     try
                     {
-                        return await ExecuteClaimAsync(command, request, ct).ConfigureAwait(false);
+                        return await ExecuteClaimAsync(connection, command, request, ct).ConfigureAwait(false);
                     }
                     finally
                     {
@@ -195,7 +168,8 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
             cancellationToken);
     }
 
-    private static async Task<IReadOnlyList<OutboxMessageDetails>> ExecuteClaimAsync(OracleCommand command, ClaimRequest request, CancellationToken ct)
+    private async Task<IReadOnlyList<OutboxMessageDetails>> ExecuteClaimAsync(
+        OracleConnection connection, OracleCommand command, ClaimRequest request, CancellationToken ct)
     {
         var parameters = command.Parameters;
         parameters.Add(Number("lease_ms", ToMilliseconds(request.LeaseDuration)));
@@ -203,31 +177,49 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
         parameters.Add(Raw("lock_token", request.LockToken));
         parameters.Add(Text("worker_id", Truncate(request.WorkerId, OutboxLimits.MaxWorkerIdLength)));
         parameters.Add(Number("batch_size", request.BatchSize));
+        parameters.Add(Number("pause_ms", ToMilliseconds(ClaimTestPause)));
         var ids = parameters.Add(new OracleParameter("claimed_ids", OracleDbType.Varchar2, 32767) { Direction = ParameterDirection.Output });
-        var cursor = parameters.Add(new OracleParameter("claimed", OracleDbType.RefCursor) { Direction = ParameterDirection.Output });
 
+        // The claim commits here (autocommit): the rows are leased to this token and their attempts are counted.
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
 
-        // OR-02: the cursor is open on the server even when nothing was claimed, so it is disposed on every path.
-        using var refCursor = cursor.Value as OracleRefCursor;
         var order = ParseIds(ids.Value);
-        if (order.Count == 0 || refCursor is null)
+        if (order.Count == 0)
         {
             return [];
         }
 
+        // OR-11: read the leased rows with a plain query by primary key, on the same connection. No other worker can change them
+        // before the lease ends, and this command fetches the payloads and texts inline.
+        var bucket = OracleOutboxSql.ClaimedRowBucketFor(order.Count);
         var rows = new Dictionary<Guid, OutboxMessageDetails>(order.Count);
-        var reader = refCursor.GetDataReader();
-        await using (reader.ConfigureAwait(false))
+        var select = _connections.CreateCommand(connection, _sql.GetClaimedRows(bucket));
+        await using (select.ConfigureAwait(false))
         {
-            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            try
             {
-                var details = ReadDetails(reader);
-                rows[details.Id] = details;
+                for (var i = 0; i < bucket; i++)
+                {
+                    select.Parameters.Add(Raw("i" + i.ToString(CultureInfo.InvariantCulture), order[Math.Min(i, order.Count - 1)])); // pad by repeating the last ID
+                }
+
+                var reader = await select.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                await using (reader.ConfigureAwait(false))
+                {
+                    while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                    {
+                        var details = ReadDetails((OracleDataReader)reader);
+                        rows[details.Id] = details;
+                    }
+                }
+            }
+            finally
+            {
+                OracleConnectionSource.DisposeParameters(select);
             }
         }
 
-        // The cursor's row order is unspecified; return the claim order (oldest AVAILABLE_AT first).
+        // Return the claim order (oldest AVAILABLE_AT first).
         var result = new List<OutboxMessageDetails>(order.Count);
         foreach (var id in order)
         {
@@ -511,6 +503,10 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
         return total;
     }
 
+    /// <summary>
+    /// Checks that the table answers and that its three function-based indexes exist and are usable (OR-12). Oracle ignores a hint
+    /// whose index is missing or unusable, so without this check DbRelay would keep running on full table scans.
+    /// </summary>
     public Task CheckHealthAsync(CancellationToken cancellationToken) =>
         _connections.ExecuteAsync(
             async (connection, ct) =>
@@ -518,7 +514,19 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
                 var command = _connections.CreateCommand(connection, _sql.HealthCheck);
                 await using (command.ConfigureAwait(false))
                 {
-                    await command.ExecuteScalarAsync(ct).ConfigureAwait(false);
+                    var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, ct).ConfigureAwait(false);
+                    await using (reader.ConfigureAwait(false))
+                    {
+                        await reader.ReadAsync(ct).ConfigureAwait(false);
+                        var usableIndexes = Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture);
+                        if (usableIndexes < 3)
+                        {
+                            throw new InvalidOperationException(
+                                $"An outbox index of {_sql.Table} is missing or unusable ({usableIndexes} of {_sql.ClaimIndexName}, {_sql.CleanupIndexName} and {_sql.DeadIndexName} are valid). " +
+                                "Run EnsureCreatedAsync to create a missing index, or ALTER INDEX ... REBUILD an unusable one; until then DbRelay scans the whole table.");
+                        }
+                    }
+
                     return true;
                 }
             },
