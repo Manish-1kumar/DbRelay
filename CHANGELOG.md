@@ -7,6 +7,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **The `DbRelay.SqlServer` package.** The provider shipped as source in 0.1.0. Its public API is unchanged:
+  `UseSqlServer(connectionString, ...)`, `UseSqlServer(Func<IServiceProvider, SqlConnection>, ...)` and
+  `SqlServerOutboxOptions`. It depends on Microsoft.Data.SqlClient 7.1.2 or later.
+- CI runs the SQL Server provider suite on SQL Server 2019 and 2025 as well as 2022, with and without
+  `READ_COMMITTED_SNAPSHOT`. Azure SQL Database is still not tested (K7).
+
+### Changed
+
+- Packing compares `DbRelay.Abstractions`, `DbRelay` and `DbRelay.PostgreSql` with their published 0.1.0 packages (package
+  validation baseline), so an unintended breaking change fails the build.
+
 ## [0.1.0] - 2026-11-23
 
 First release.

@@ -64,14 +64,31 @@ public sealed class SqlServerFixture : IAsyncLifetime
         }
 
         var builder = new SqlConnectionStringBuilder(baseConnectionString);
-        var database = string.IsNullOrEmpty(builder.InitialCatalog) || builder.InitialCatalog.Equals("master", StringComparison.OrdinalIgnoreCase)
-            ? DefaultDatabase
-            : builder.InitialCatalog;
+        var named = !string.IsNullOrEmpty(builder.InitialCatalog) && !builder.InitialCatalog.Equals("master", StringComparison.OrdinalIgnoreCase);
+        var database = named ? builder.InitialCatalog : DefaultDatabase;
         var rcsiDatabase = database + "_rcsi";
 
+        bool azure;
         try
         {
-            await PrepareDatabasesAsync(builder, database, rcsiDatabase);
+            azure = await IsAzureSqlDatabaseAsync(builder);
+            if (azure)
+            {
+                // Never create or alter databases on Azure SQL Database: a database created with CREATE DATABASE is not
+                // covered by the free offer and is billed. The tests use only databases the developer created (CONTRIBUTING).
+                Source += " (Azure SQL Database)";
+                if (!named)
+                {
+                    SkipReason = RcsiSkipReason =
+                        $"Azure SQL Database: name the RCSI-off test database in {EnvironmentVariable} (Database=...). " +
+                        "The tests never create databases on Azure SQL.";
+                    return;
+                }
+            }
+            else
+            {
+                await PrepareDatabasesAsync(builder, database, rcsiDatabase);
+            }
         }
         catch (Exception ex) when (ex is SqlException or InvalidOperationException)
         {
@@ -84,22 +101,71 @@ public sealed class SqlServerFixture : IAsyncLifetime
         builder.InitialCatalog = rcsiDatabase;
         RcsiConnectionString = builder.ConnectionString;
 
-        if (await IsRcsiOnAsync(ConnectionString))
-        {
-            SkipReason = $"Database '{database}' has READ_COMMITTED_SNAPSHOT ON; the RCSI-off tests need it OFF.";
-        }
-
-        if (!await IsRcsiOnAsync(RcsiConnectionString))
-        {
-            RcsiSkipReason = $"Database '{rcsiDatabase}' could not be switched to READ_COMMITTED_SNAPSHOT ON.";
-        }
+        SkipReason = await CheckDatabaseAsync(ConnectionString, database, wantRcsi: false, azure);
+        RcsiSkipReason = await CheckDatabaseAsync(RcsiConnectionString, rcsiDatabase, wantRcsi: true, azure);
 
         // K13: remove schemas left behind by killed test processes.
-        foreach (var connectionString in new[] { ConnectionString, RcsiConnectionString })
+        foreach (var (connectionString, skip) in new[] { (ConnectionString, SkipReason), (RcsiConnectionString, RcsiSkipReason) })
         {
+            if (skip is not null)
+            {
+                continue;
+            }
+
             await using var connection = new SqlConnection(connectionString);
             await connection.OpenAsync();
             await DbRelay.Testing.TestSchemaNames.SweepSqlServerAsync(connection);
+        }
+    }
+
+    /// <summary>
+    /// Returns null when <paramref name="databaseName"/> is reachable and has the wanted READ_COMMITTED_SNAPSHOT setting,
+    /// otherwise the reason its tests are skipped.
+    /// </summary>
+    private static async Task<string?> CheckDatabaseAsync(string connectionString, string databaseName, bool wantRcsi, bool azure)
+    {
+        bool rcsi;
+        try
+        {
+            rcsi = await IsRcsiOnAsync(connectionString);
+        }
+        catch (SqlException ex) when (azure)
+        {
+            return $"Azure SQL Database '{databaseName}' is not reachable ({ex.Number}: {ex.Message}). Create it with the free " +
+                "offer (see CONTRIBUTING); the tests never create databases on Azure SQL.";
+        }
+
+        if (rcsi == wantRcsi)
+        {
+            return null;
+        }
+
+        var wanted = wantRcsi ? "ON" : "OFF";
+        return azure
+            ? $"Azure SQL Database '{databaseName}' needs READ_COMMITTED_SNAPSHOT {wanted}. Run once, connected to master, with " +
+              $"no other connections to it: ALTER DATABASE [{databaseName}] SET READ_COMMITTED_SNAPSHOT {wanted};"
+            : $"Database '{databaseName}' has READ_COMMITTED_SNAPSHOT {(rcsi ? "ON" : "OFF")}; these tests need it {wanted}.";
+    }
+
+    /// <summary>
+    /// True for Azure SQL Database (engine edition 5). Connects to the named database, or to master when it is not reachable
+    /// (on a local server the test database may not exist yet).
+    /// </summary>
+    private static async Task<bool> IsAzureSqlDatabaseAsync(SqlConnectionStringBuilder builder)
+    {
+        const string Sql = "SELECT CAST(SERVERPROPERTY('EngineEdition') AS int);";
+        try
+        {
+            await using var connection = new SqlConnection(builder.ConnectionString);
+            await connection.OpenAsync();
+            return await connection.ExecuteScalarAsync<int>(Sql) == 5;
+        }
+        catch (SqlException)
+        {
+            var master = new SqlConnectionStringBuilder(builder.ConnectionString) { InitialCatalog = "master" };
+            await using var connection = new SqlConnection(master.ConnectionString);
+            await connection.OpenAsync();
+            return await connection.ExecuteScalarAsync<int>(Sql) == 5;
         }
     }
 

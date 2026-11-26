@@ -4,7 +4,8 @@
 (Dapper or plain ADO.NET). A background dispatcher delivers it to one interface you implement, **at least once**, with
 database-clock leases, lock-token fencing, retries with jitter and dead-lettering.
 
-- Packages: `DbRelay.Abstractions` (contracts, no dependencies), `DbRelay` (engine), `DbRelay.PostgreSql` (provider).
+- Packages: `DbRelay.Abstractions` (contracts, no dependencies), `DbRelay` (engine), and one provider: `DbRelay.PostgreSql`
+  or `DbRelay.SqlServer`. Each provider brings in the other two.
 - Targets .NET 8, 9, 10 and 11. No EF Core, no broker or messaging framework required.
 
 ## Quick start (PostgreSQL)
@@ -53,6 +54,35 @@ internal sealed class LoggingDeliveryHandler(ILogger<LoggingDeliveryHandler> log
 Return `DeliveryResult.Retry(reason, retryAfter)` for transient failures and `DeliveryResult.DeadLetter(reason)` for permanent
 ones. Use `OutboxMessage.Id` as the idempotency key on the receiving side: delivery is at-least-once.
 
+## SQL Server
+
+Register `UseSqlServer` instead of `UsePostgreSql`, and enqueue on your `SqlConnection` and `SqlTransaction`. Everything
+else is the same:
+
+```csharp
+builder.Services.AddDbRelay(relay =>
+{
+    relay.UseSqlServer(connectionString, sql => sql.Schema = "sample");
+    relay.UseDeliveryHandler<ConsoleDeliveryHandler>();
+});
+```
+
+```csharp
+await using var connection = new SqlConnection(connectionString);
+await connection.OpenAsync(ct);
+await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(ct);
+
+await connection.ExecuteAsync(
+    "INSERT INTO [sample].[orders] ([id], [customer], [total]) VALUES (@Id, @Customer, @Total)", order, transaction);
+
+var messageId = await outbox.EnqueueAsync(transaction, new OrderPlaced(order.Id, order.Customer, order.Total), ct);
+
+await transaction.CommitAsync(ct);
+```
+
+It works with and without `READ_COMMITTED_SNAPSHOT`. Read the SQL Server guide before production: the filtered indexes
+need `QUOTED_IDENTIFIER ON`, and the provider uses index hints.
+
 ## Documentation
 
 - [README and full documentation](https://github.com/Manish-1kumar/DbRelay#readme)
@@ -60,6 +90,7 @@ ones. Use `OutboxMessage.Id` as the idempotency key on the receiving side: deliv
 - [Configuration reference](https://github.com/Manish-1kumar/DbRelay/blob/main/docs/configuration.md)
 - [Reliability guarantees and the tests that prove them](https://github.com/Manish-1kumar/DbRelay/blob/main/docs/reliability.md)
 - [PostgreSQL guide](https://github.com/Manish-1kumar/DbRelay/blob/main/docs/postgres.md)
+- [SQL Server guide](https://github.com/Manish-1kumar/DbRelay/blob/main/docs/sqlserver.md)
 - [Troubleshooting](https://github.com/Manish-1kumar/DbRelay/blob/main/docs/troubleshooting.md)
 - [Changelog](https://github.com/Manish-1kumar/DbRelay/blob/main/CHANGELOG.md)
 
