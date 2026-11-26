@@ -95,11 +95,7 @@ internal sealed class OracleOutboxSql
                 v_id    RAW(16);
                 v_size  NUMBER;
                 CURSOR c_due IS
-                    SELECT ROWID, ID, NVL(DBMS_LOB.GETLENGTH(PAYLOAD), 0)
-                    FROM {table}
-                    WHERE {ClaimKey} <= v_now
-                    ORDER BY {ClaimKey}
-                    FOR UPDATE SKIP LOCKED;
+                    {ClaimCandidates("v_now")};
             BEGIN
                 v_until := v_now + NUMTODSINTERVAL(:lease_ms / 1000, 'SECOND');
                 OPEN c_due;
@@ -119,7 +115,7 @@ internal sealed class OracleOutboxSql
                 CLOSE c_due;
                 :claimed_ids := v_ids;
                 OPEN :claimed FOR
-                    SELECT {_columns} FROM {table}
+                    SELECT {Hint("INDEX", ClaimIndexName)} {_columns} FROM {table} t
                     WHERE {ClaimKey} = v_until AND LOCK_TOKEN = :lock_token;
             END;
             """;
@@ -150,10 +146,7 @@ internal sealed class OracleOutboxSql
                 v_rowids t_rowids;
                 v_cutoff TIMESTAMP(6) := {Now} - NUMTODSINTERVAL(:older_than_ms / 1000, 'SECOND');
                 CURSOR c_old IS
-                    SELECT ROWID FROM {table}
-                    WHERE {CleanupKey} < v_cutoff
-                    ORDER BY {CleanupKey}
-                    FOR UPDATE SKIP LOCKED;
+                    {CleanupCandidates("v_cutoff")};
             BEGIN
                 OPEN c_old;
                 FETCH c_old BULK COLLECT INTO v_rowids LIMIT :max_count;
@@ -167,17 +160,17 @@ internal sealed class OracleOutboxSql
         SelectById = $"SELECT {_columns} FROM {table} WHERE ID = :id";
 
         // One scalar subquery per status. Each predicate repeats an index expression (claim: STATUS IN (0, 1); cleanup: STATUS = 2;
-        // dead: STATUS = 3), so no count needs a full table scan.
+        // dead: STATUS = 3) and is hinted to it, so no count scans the table, whatever the optimizer statistics say.
         Statistics =
             $"""
             SELECT
-                (SELECT COUNT(*) FROM {table} WHERE {ClaimStatusKey} = 0),
-                (SELECT COUNT(*) FROM {table} WHERE {ClaimStatusKey} = 1),
-                (SELECT COUNT(*) FROM {table} WHERE {CleanupKey} IS NOT NULL),
-                (SELECT COUNT(*) FROM {table} WHERE {DeadKey} IS NOT NULL),
+                (SELECT {Hint("INDEX_FFS", ClaimIndexName)} COUNT(*) FROM {table} t WHERE {ClaimStatusKey} = 0),
+                (SELECT {Hint("INDEX_FFS", ClaimIndexName)} COUNT(*) FROM {table} t WHERE {ClaimStatusKey} = 1),
+                (SELECT {Hint("INDEX_FFS", CleanupIndexName)} COUNT(*) FROM {table} t WHERE {CleanupKey} IS NOT NULL),
+                (SELECT {Hint("INDEX_FFS", DeadIndexName)} COUNT(*) FROM {table} t WHERE {DeadKey} IS NOT NULL),
                 (SELECT EXTRACT(DAY FROM age) * 86400000 + EXTRACT(HOUR FROM age) * 3600000 + EXTRACT(MINUTE FROM age) * 60000
                         + ROUND(EXTRACT(SECOND FROM age) * 1000)
-                 FROM (SELECT {Now} - MIN({ClaimKey}) AS age FROM {table} WHERE {ClaimKey} <= {Now}))
+                 FROM (SELECT {Hint("INDEX", ClaimIndexName)} {Now} - MIN({ClaimKey}) AS age FROM {table} t WHERE {ClaimKey} <= {Now}))
             FROM DUAL
             """;
 
@@ -339,17 +332,36 @@ internal sealed class OracleOutboxSql
         END;
         """;
 
-    private static string RequeueMany(string table, bool filterByType) =>
+    /// <summary>
+    /// The claim cursor: due pending and leased rows in AVAILABLE_AT order, hinted to the claim index so a large table is never
+    /// scanned and sorted. Oracle ignores a hint whose index does not exist, so a dropped index slows the claim but cannot break it.
+    /// </summary>
+    internal string ClaimCandidates(string now) =>
+        $"SELECT {Hint("INDEX", ClaimIndexName)} ROWID, ID, NVL(DBMS_LOB.GETLENGTH(PAYLOAD), 0) FROM {Table} t " +
+        $"WHERE {ClaimKey} <= {now} ORDER BY {ClaimKey} FOR UPDATE SKIP LOCKED";
+
+    /// <summary>The retention cleanup cursor: delivered rows older than <paramref name="cutoff"/>, oldest first.</summary>
+    internal string CleanupCandidates(string cutoff) =>
+        $"SELECT {Hint("INDEX", CleanupIndexName)} ROWID FROM {Table} t WHERE {CleanupKey} < {cutoff} " +
+        $"ORDER BY {CleanupKey} FOR UPDATE SKIP LOCKED";
+
+    /// <summary>The dead-letter requeue cursor, oldest first.</summary>
+    internal string DeadCandidates(bool filterByType) =>
+        $"SELECT {Hint("INDEX", DeadIndexName)} ROWID FROM {Table} t WHERE {DeadKey} IS NOT NULL" +
+        (filterByType ? " AND MESSAGE_TYPE = :message_type" : string.Empty) +
+        $" ORDER BY {DeadKey} FOR UPDATE SKIP LOCKED";
+
+    /// <summary>An optimizer hint for table alias <c>t</c>. Index names are upper-case letters, digits and underscores.</summary>
+    private static string Hint(string hint, string index) => $"/*+ {hint}(t {index}) */";
+
+    private string RequeueMany(string table, bool filterByType) =>
         $"""
         DECLARE
             TYPE t_rowids IS TABLE OF ROWID INDEX BY PLS_INTEGER;
             v_rowids t_rowids;
             v_now    TIMESTAMP(6) := {Now};
             CURSOR c_dead IS
-                SELECT ROWID FROM {table}
-                WHERE {DeadKey} IS NOT NULL{(filterByType ? " AND MESSAGE_TYPE = :message_type" : string.Empty)}
-                ORDER BY {DeadKey}
-                FOR UPDATE SKIP LOCKED;
+                {DeadCandidates(filterByType)};
         BEGIN
             OPEN c_dead;
             FETCH c_dead BULK COLLECT INTO v_rowids LIMIT :max_count;

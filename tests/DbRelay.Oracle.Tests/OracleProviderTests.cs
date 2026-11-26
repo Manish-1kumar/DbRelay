@@ -355,29 +355,31 @@ public sealed class OracleProviderTests(OracleFixture fixture)
                 "BEGIN DBMS_STATS.GATHER_TABLE_STATS(ownname => :Owner, tabname => 'OUTBOX_MESSAGES', cascade => TRUE); END;",
                 new { Owner = schema.ToUpperInvariant() });
 
+            // The exact cursor queries the PL/SQL blocks run, with their PL/SQL variables replaced by the database clock.
             var now = OracleOutboxSql.Now;
-            var claim = await PlanAsync(connection,
-                $"SELECT ROWID, ID FROM {table} WHERE {OracleOutboxSql.ClaimKey} <= {now} ORDER BY {OracleOutboxSql.ClaimKey} FOR UPDATE SKIP LOCKED");
-            Assert.Contains(sql.ClaimIndexName, claim, StringComparison.Ordinal);
+            var claim = await PlanAsync(connection, sql.ClaimCandidates(now));
+            AssertUses(claim, sql.ClaimIndexName);
+            Assert.False(claim.Contains("SORT ORDER BY", StringComparison.Ordinal), "The claim must stream rows in index order:\n" + claim);
 
-            var cleanup = await PlanAsync(connection,
-                $"SELECT ROWID FROM {table} WHERE {OracleOutboxSql.CleanupKey} < {now} - INTERVAL '1' DAY ORDER BY {OracleOutboxSql.CleanupKey} FOR UPDATE SKIP LOCKED");
-            Assert.Contains(sql.CleanupIndexName, cleanup, StringComparison.Ordinal);
-
-            var dead = await PlanAsync(connection,
-                $"SELECT ROWID FROM {table} WHERE {OracleOutboxSql.DeadKey} IS NOT NULL ORDER BY {OracleOutboxSql.DeadKey} FOR UPDATE SKIP LOCKED");
-            Assert.Contains(sql.DeadIndexName, dead, StringComparison.Ordinal);
+            AssertUses(await PlanAsync(connection, sql.CleanupCandidates(now + " - INTERVAL '1' DAY")), sql.CleanupIndexName);
+            AssertUses(await PlanAsync(connection, sql.DeadCandidates(filterByType: false)), sql.DeadIndexName);
+            AssertUses(await PlanAsync(connection, sql.DeadCandidates(filterByType: true).Replace(":message_type", "'plan.test'", StringComparison.Ordinal)), sql.DeadIndexName);
 
             var statistics = await PlanAsync(connection, sql.Statistics);
-            Assert.Contains(sql.ClaimIndexName, statistics, StringComparison.Ordinal);
-            Assert.Contains(sql.CleanupIndexName, statistics, StringComparison.Ordinal);
-            Assert.Contains(sql.DeadIndexName, statistics, StringComparison.Ordinal);
-            Assert.DoesNotContain("TABLE ACCESS FULL OUTBOX_MESSAGES", statistics, StringComparison.Ordinal);
+            AssertUses(statistics, sql.ClaimIndexName);
+            AssertUses(statistics, sql.CleanupIndexName);
+            AssertUses(statistics, sql.DeadIndexName);
         }
         finally
         {
             await DropSchemaAsync(fixture, schema);
         }
+    }
+
+    private static void AssertUses(string plan, string index)
+    {
+        Assert.True(plan.Contains(index, StringComparison.Ordinal), $"Expected the plan to use {index}:\n{plan}");
+        Assert.False(plan.Contains("TABLE ACCESS FULL", StringComparison.Ordinal), "The plan scans the whole table:\n" + plan);
     }
 
     /// <summary>Returns the plan of <paramref name="query"/> as "OPERATION OPTIONS OBJECT" lines.</summary>
