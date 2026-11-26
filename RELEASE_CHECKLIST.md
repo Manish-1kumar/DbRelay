@@ -1,6 +1,6 @@
-# Release Checklist: 0.1.0 (release candidate)
+# Release Checklist: 0.1.0 (published 2026-11-26)
 
-_Last updated: 2026-11-22 · Packages in this release: `DbRelay.Abstractions`, `DbRelay`, `DbRelay.PostgreSql`. `DbRelay.SqlServer` is built and
+_Last updated: 2026-11-26 · Packages in this release: `DbRelay.Abstractions`, `DbRelay`, `DbRelay.PostgreSql`. `DbRelay.SqlServer` is built and
 tested but not packed until 0.2.0 (project brief §15)._
 
 Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · ❌ not done · 🔒 requires owner approval
@@ -44,7 +44,7 @@ Legend: ✅ done and verified · ⏳ done locally, awaiting an external step · 
 | Enable GitHub private vulnerability reporting | ✅ (2026-11-22) |
 | Package-specific README with absolute links (`src/PACKAGE_README.md`, packed as README.md; 0 relative links verified) | ✅ |
 | Make the repository public | ✅ (2026-11-22). Re-created from a history rewritten to the GitHub no-reply address; the original private repository is kept as `DbRelay-archive` |
-| Tag `v0.1.0` and publish to NuGet (owner approved 2026-11-26) via `.github/workflows/publish.yml`: nuget.org Trusted Publishing, `nuget` environment with required reviewer | ⏳ |
+| Tag `v0.1.0` and publish to NuGet (owner approved 2026-11-26) via `.github/workflows/publish.yml`: nuget.org Trusted Publishing, `nuget` environment with required reviewer | ✅ (2026-11-26). Run 45692836402: 3 packages + 3 symbol packages pushed; installed from nuget.org in a fresh app |
 | Create the GitHub release with CHANGELOG notes | 🔒 |
 
 ## Engineering items carried to 0.2

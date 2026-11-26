@@ -4,8 +4,8 @@
 have, using Dapper or plain ADO.NET. A background dispatcher delivers it to one interface you implement. Every reliability
 guarantee is written down and mapped to a test that runs against real PostgreSQL and SQL Server.
 
-> Status: **0.1.0, unreleased.** The packages are not on NuGet yet. Until they are, reference the projects in `src/`. The API
-> may change before 1.0.
+> Status: **0.1.0, released on NuGet** (`DbRelay.Abstractions`, `DbRelay`, `DbRelay.PostgreSql`). The SQL Server package
+> ships in 0.2.0; until then, reference [`src/DbRelay.SqlServer`](src/DbRelay.SqlServer). The API may change before 1.0.
 
 ## The problem: dual writes
 
@@ -37,11 +37,10 @@ Core integration. It does not make delivery exactly-once: it delivers **at least
 
 ## Quick start (PostgreSQL)
 
-**1. Reference the provider.** It brings in `DbRelay` and `DbRelay.Abstractions`.
+**1. Add the provider package.** It brings in `DbRelay` and `DbRelay.Abstractions`.
 
-```xml
-<ProjectReference Include="path/to/src/DbRelay.PostgreSql/DbRelay.PostgreSql.csproj" />
-<!-- after the 0.1.0 release: <PackageReference Include="DbRelay.PostgreSql" Version="0.1.0" /> -->
+```shell
+dotnet add package DbRelay.PostgreSql --version 0.1.0
 ```
 
 **2. Register DbRelay, a delivery handler and the health check** (from [`samples/PostgreSql.Sample/Program.cs`](samples/PostgreSql.Sample/Program.cs)):

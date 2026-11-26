@@ -1,9 +1,10 @@
 # Project Status
 
-_Last updated: 2026-11-22_
+_Last updated: 2026-11-26_
 
-**Phase:** Milestone 14, release candidate ready **pending owner actions** (see RELEASE_CHECKLIST.md).
-Public at https://github.com/Manish-1kumar/DbRelay (since 2026-11-22; private vulnerability reporting enabled). Nothing published to NuGet.
+**Phase:** **0.1.0 released to NuGet** (2026-11-26): `DbRelay.Abstractions`, `DbRelay`, `DbRelay.PostgreSql`. The
+`DbRelay.SqlServer` package follows in 0.2.0. Public at https://github.com/Manish-1kumar/DbRelay (since 2026-11-22; private
+vulnerability reporting enabled). Open owner items are in RELEASE_CHECKLIST.md.
 
 | Milestone | Status | Notes |
 |---|---|---|
@@ -20,7 +21,7 @@ Public at https://github.com/Manish-1kumar/DbRelay (since 2026-11-22; private vu
 | M11 Docs + samples | COMPLETED | README, 9 guides, 3 samples (run against real DBs) |
 | M12 CI + packaging | COMPLETED | First CI run green on GitHub (1,140/1,140, 0 skipped; PG 15/16/18 jobs green) |
 | M13 Production-readiness audit | COMPLETED | Follow-up audit refuted "no open High" (FU-01); FU-01..FU-10 fixed and re-verified (1,140 test runs, 0 failed); FU-01/FU-04 mutation-checked. No independent re-audit of the FU fixes yet |
-| M14 Release candidate | BLOCKED (owner) | Engineering done; NuGet prefix, contacts, public visibility and trademark check need the owner |
+| M14 Release candidate | COMPLETED | 0.1.0 published 2026-11-26 (publish run 45692836402). Still optional for the owner: NuGet prefix reservation, trademark check, GitHub release |
 | Post-RC: batched acknowledgements (ADR 0003) | REVIEWED | Up to ~2.8× throughput under load (`docs/benchmarks.md` §3); BA review: 0 Critical/High, BA-01..BA-12 fixed or accepted; full run 1,280/1,280, 0 skipped (4 TFMs), locally and in CI run 45025481068 |
 | Post-RC: 0.2 engineering backlog | COMPLETED | T-03, K13, CR-21, CR-18 (ADR 0004), multi-row PostgreSQL insert, CR-11/T-05, BA-05, BA-07 (3 SQL Server deadlock cycles found and fixed or documented). Full run 1,392/1,392, 0 skipped; soak PASS on both providers |
 | Post-RC: soak/chaos testing | COMPLETED | `docs/soak/`: PostgreSQL 2 h and SQL Server 1 h, PASS 9/9 each with 0 lost or orphaned messages under worker kills and session kills |

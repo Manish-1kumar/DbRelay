@@ -12,12 +12,14 @@ apart from the registration call; see [the SQL Server section](#sql-server).
 
 ## 2. Add DbRelay
 
-The 0.1.0 packages are not published yet. Reference the provider project, which brings in `DbRelay` and
-`DbRelay.Abstractions`:
+Add the provider package, which brings in `DbRelay` and `DbRelay.Abstractions`:
 
-```xml
-<ProjectReference Include="path/to/src/DbRelay.PostgreSql/DbRelay.PostgreSql.csproj" />
+```shell
+dotnet add package DbRelay.PostgreSql --version 0.1.0
 ```
+
+The SQL Server package ships in 0.2.0. Until then, reference the project instead:
+`<ProjectReference Include="path/to/src/DbRelay.SqlServer/DbRelay.SqlServer.csproj" />`.
 
 The samples also use Dapper for business writes. DbRelay itself does not depend on Dapper: it works with any code that holds
 an `NpgsqlTransaction` or `SqlTransaction`.
