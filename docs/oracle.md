@@ -75,13 +75,20 @@ Oracle does not store, so each index stays as small as a partial index would be.
   back as `null`. An empty payload is stored as an empty BLOB and reads back as empty.
 - **`transaction: null` on a connection that has a transaction joins that transaction,** as on PostgreSQL. ODP.NET runs
   every command in its connection's transaction. Pass the transaction anyway, so the intent is explicit.
-- **`EnqueueManyAsync`:**
-  - Up to 90 messages are written by one `INSERT ALL` statement.
-  - More messages need several statements, and run in your transaction.
-  - If you pass no transaction, DbRelay begins one on your connection and commits it, so the call stays all-or-nothing. On
-    SQL Server the same happens above 200 messages (K9).
+- **`EnqueueManyAsync` is always one statement,** so it is all-or-nothing on its own, and DbRelay never begins a
+  transaction on your connection.
+  - Up to 90 messages are one `INSERT ALL` statement.
+  - Up to the maximum of 1,000, they are one anonymous PL/SQL block of `INSERT ALL` statements, which Oracle runs and rolls
+    back as one statement.
+  - If one row fails, nothing from the call is left in your transaction, even if you catch the error and commit.
 - **Claims** use `FOR UPDATE SKIP LOCKED` in a PL/SQL block that fetches and locks one row at a time, so concurrent
-  dispatchers never wait for each other or claim the same message.
+  dispatchers never wait for each other.
+  - Each locked row is checked again before it is claimed, so a message that changed after the claim chose it, for example
+    one just acknowledged, is never claimed twice.
+  - The claimed rows are then read by ID, with their payloads in the same round trip.
+- **The health check fails if an outbox index is missing or unusable.** Oracle ignores a hint whose index is missing, so
+  DbRelay would otherwise keep working with full table scans. Run `EnsureCreatedAsync` to recreate a missing index, or
+  `ALTER INDEX ... REBUILD` an unusable one.
 - **Times** are `TIMESTAMP(6)` in UTC, read from the database clock (`SYS_EXTRACT_UTC(SYSTIMESTAMP)`).
 - **Text is Unicode whatever the database character set:** text columns are `NVARCHAR2` and `NCLOB`, so message types,
   headers and errors survive even on a database created with a single-byte character set such as `WE8MSWIN1252`.

@@ -85,9 +85,10 @@ is **one anonymous PL/SQL block**, autocommitted as one statement:
    update re-checks `STATUS IN (0, 1) AND AVAILABLE_AT <= now` on the row it locked, and only rows it changed are claimed (OR-01).
    The cursor chose the row from its read snapshot, so a row changed in between is never claimed twice.
 4. It returns the claimed IDs in claim order, as one string of 32 hex digits per ID (32,000 characters for the maximum batch of
-   1,000, within `VARCHAR2(32767)`). It also returns a `REF CURSOR` over the claimed rows, found through the claim index:
-   every claimed row has the same new `AVAILABLE_AT` and the claim's lock token. This avoids PL/SQL array binds, whose type
-   rules differ between Oracle and driver versions.
+   1,000, within `VARCHAR2(32767)`). This avoids PL/SQL array binds, whose type rules differ between Oracle and driver
+   versions.
+5. The store then reads the claimed rows by primary key on its own command, so their payloads come back inline (OR-11). A
+   first version returned a `REF CURSOR`, whose LOB fetch size could not be confirmed.
 
 ### Guarded updates, acknowledgements and inserts
 - **State changes after a claim:** single statements guarded by `WHERE ID = :id AND LOCK_TOKEN = :token` (invariant 4).
@@ -98,10 +99,10 @@ is **one anonymous PL/SQL block**, autocommitted as one statement:
 - **Inserts:** always on the caller's connection and transaction (invariants 1 and 2).
   - Up to 90 rows go in **one `INSERT ALL` statement**, which is all-or-nothing on its own. Oracle allows at most 999
     columns across the clauses, and each row sets 10.
-  - More rows need several statements. With a caller transaction they run in it.
-  - Without one, DbRelay begins a transaction and commits it, as the SQL Server provider does (K9). If the connection
-    already has a transaction the caller did not pass, ODP.NET refuses a second one, and the statements run in the
-    existing transaction instead.
+  - Up to 1,000 rows (the enqueue limit) go in **one anonymous PL/SQL block** of `INSERT ALL` statements. Oracle runs a
+    block called from the client as one statement and rolls all of it back on an error (OR-04).
+  - So DbRelay never begins a transaction on the caller's connection, and a failed call leaves no rows in the caller's
+    transaction. A first version began its own transaction above 90 rows, as SQL Server does above 200 (K9).
 - **`transaction: null` on a connection that has a transaction:** ODP.NET runs the command in that transaction. This is
   the same documented behaviour as PostgreSQL, and a test pins it.
 
