@@ -103,6 +103,25 @@ public static partial class TestSchemaNames
         return dropped;
     }
 
+    /// <summary>
+    /// Drops stale MySQL / MariaDB test schemas. In MySQL a schema is a database. Best effort: failures are ignored.
+    /// </summary>
+    public static async Task<int> SweepMySqlAsync(DbConnection connection)
+    {
+        var stale = await ListStaleAsync(connection, "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME REGEXP '^(t|it|p)_[0-9a-f]{16}$'");
+        var dropped = 0;
+        foreach (var schema in stale)
+        {
+            // The name matched the pattern above, so it contains only letters, digits and an underscore.
+            if (await TryExecuteAsync(connection, $"DROP DATABASE IF EXISTS `{schema}`"))
+            {
+                dropped++;
+            }
+        }
+
+        return dropped;
+    }
+
     private static async Task<List<string>> ListStaleAsync(DbConnection connection, string sql)
     {
         var now = DateTimeOffset.UtcNow;

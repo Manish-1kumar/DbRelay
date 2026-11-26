@@ -13,7 +13,7 @@
       change. Pre-1.0 an intended break is allowed: suppress that diagnostic deliberately and record it in the CHANGELOG.
       DbRelay.SqlServer has no published baseline before 0.2.0.
     -->
-    <PackageValidationBaselineVersion Condition="'$(MSBuildProjectName)' != 'DbRelay.SqlServer' and '$(MSBuildProjectName)' != 'DbRelay.Oracle'">0.1.0</PackageValidationBaselineVersion>
+    <PackageValidationBaselineVersion Condition="'$(MSBuildProjectName)' != 'DbRelay.SqlServer' and '$(MSBuildProjectName)' != 'DbRelay.Oracle' and '$(MSBuildProjectName)' != 'DbRelay.MySql'">0.1.0</PackageValidationBaselineVersion>
 
     <!-- Package metadata -->
     <Authors>DbRelay contributors</Authors>

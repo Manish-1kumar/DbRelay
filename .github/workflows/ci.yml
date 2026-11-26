@@ -20,6 +20,7 @@ env:
   # Ephemeral CI-only container credentials; not secrets.
   MSSQL_SA_PASSWORD: "DbRelay_CI_Pa55w0rd!"
   ORACLE_PASSWORD: "DbRelay_CI_Pa55w0rd"
+  MYSQL_ROOT_PASSWORD: "DbRelay_CI_Pa55w0rd"
 
 jobs:
   build-test:
@@ -56,11 +57,20 @@ jobs:
         ports: ["1521:1521"]
         options: >-
           --health-cmd healthcheck.sh --health-interval 10s --health-timeout 5s --health-retries 60
+      # MySQL 8.4 LTS. Tests connect as root because each test creates its own schema, which in MySQL is a database.
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -p$MYSQL_ROOT_PASSWORD --silent" --health-interval 5s --health-timeout 5s --health-retries 40
 
     env:
       DBRELAY_TEST_POSTGRES: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=dbrelay_tests;Include Error Detail=true"
       DBRELAY_TEST_SQLSERVER: "Server=localhost,1433;User ID=sa;Password=DbRelay_CI_Pa55w0rd!;TrustServerCertificate=true;Database=dbrelay_tests"
       DBRELAY_TEST_ORACLE: "User Id=system;Password=DbRelay_CI_Pa55w0rd;Data Source=localhost:1521/FREEPDB1"
+      DBRELAY_TEST_MYSQL: "Server=127.0.0.1;Port=3306;User ID=root;Password=DbRelay_CI_Pa55w0rd;SslMode=Preferred;AllowPublicKeyRetrieval=true"
 
     steps:
       - uses: actions/checkout@v7
@@ -233,3 +243,43 @@ jobs:
         run: docker exec ${{ job.services.oracle.id }} bash -c "echo 'SELECT BANNER_FULL FROM V\$VERSION;' | sqlplus -s system/$ORACLE_PASSWORD@localhost:1521/${{ matrix.oracle.service }}" || true
       - name: Oracle provider tests (net10.0)
         run: dotnet test --project tests/DbRelay.Oracle.Tests -c Release -f net10.0
+
+  # MySQL 8.4 runs in build-test. MySQL 8.0 covers Aurora MySQL 3 and RDS for MySQL 8.0; MariaDB 10.11 and 11.4 are its LTS lines.
+  mysql-compat:
+    name: ${{ matrix.db.name }} compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        db:
+          - { name: "MySQL 8.0", image: "mysql:8.0", health: "mysqladmin ping -h 127.0.0.1 -uroot -pDbRelay_CI_Pa55w0rd --silent" }
+          - { name: "MariaDB 10.11", image: "mariadb:10.11", health: "healthcheck.sh --connect --innodb_initialized" }
+          - { name: "MariaDB 11.4", image: "mariadb:11.4", health: "healthcheck.sh --connect --innodb_initialized" }
+    services:
+      mysql:
+        image: ${{ matrix.db.image }}
+        env:
+          MYSQL_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
+          MARIADB_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "${{ matrix.db.health }}" --health-interval 5s --health-timeout 5s --health-retries 40
+    env:
+      DBRELAY_TEST_MYSQL: "Server=127.0.0.1;Port=3306;User ID=root;Password=DbRelay_CI_Pa55w0rd;SslMode=Preferred;AllowPublicKeyRetrieval=true"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            10.0.x
+            11.0.x
+      - uses: actions/cache@v6
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', '**/*.csproj', 'global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+      - name: Record the server version
+        run: docker exec ${{ job.services.mysql.id }} sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SELECT VERSION()" 2>/dev/null || mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -e "SELECT VERSION()"' || true
+      - name: MySQL provider tests (net10.0)
+        run: dotnet test --project tests/DbRelay.MySql.Tests -c Release -f net10.0
