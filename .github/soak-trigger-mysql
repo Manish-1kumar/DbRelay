@@ -1,1 +1,1 @@
-minutes=320 rate=1.7 workers=3
+minutes=320 rate=1.7 workers=3 run=2
