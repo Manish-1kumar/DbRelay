@@ -118,7 +118,7 @@ public sealed class MySqlProviderTests(MySqlFixture fixture)
         Assert.Equal("`billing`.`outbox`", new MySqlOutboxSql("billing", "outbox").Table);
 
         var sql = new MySqlOutboxSql("s", "t" + new string('x', 62));
-        string[] names = [sql.StatusConstraintName, sql.ClaimIndexName, sql.CleanupIndexName, sql.DeadIndexName];
+        string[] names = [sql.ClaimIndexName, sql.CleanupIndexName, sql.DeadIndexName];
         Assert.All(names, n => Assert.InRange(n.Length, 1, 64));
         Assert.Equal(names.Length, names.Distinct(StringComparer.Ordinal).Count());
     }

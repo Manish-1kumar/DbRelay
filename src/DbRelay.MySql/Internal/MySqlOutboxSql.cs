@@ -25,6 +25,18 @@ internal sealed class MySqlOutboxSql
 
     internal const string Now = "UTC_TIMESTAMP(6)";
 
+    /// <summary>Insert statements up to this many rows are cached by row count (MY-03).</summary>
+    internal const int MaxCachedInsertRows = 64;
+
+    /// <summary>Reads the server's packet limit (MY-02).</summary>
+    internal const string MaxAllowedPacket = "SELECT @@max_allowed_packet";
+
+    /// <summary>
+    /// Reads whether the binary log is statement-based (MY-05): with binlog_format = STATEMENT, InnoDB rejects writes under READ
+    /// COMMITTED (error 1665), so DbRelay then keeps the session default for its own transactions.
+    /// </summary>
+    internal const string BinlogSettings = "SELECT @@log_bin, @@binlog_format";
+
     private const int MaxIdentifierLength = 64;
 
     /// <summary>Columns read into an <c>OutboxMessageDetails</c>, in ordinal order (see <c>MySqlOutboxStore.ReadDetails</c>).</summary>
@@ -33,6 +45,14 @@ internal sealed class MySqlOutboxSql
         "HEX(id)", "message_type", "destination", "payload", "content_type", "headers", "correlation_id", "causation_id", "status",
         "attempt_count", "created_at", "scheduled_at", "available_at", "locked_by", "last_attempt_at", "delivered_at",
         "dead_lettered_at", "last_error",
+    ];
+
+    /// <summary>Columns the provider's statements need; the health check and EnsureCreatedAsync verify they exist (MY-08).</summary>
+    internal static readonly string[] RequiredColumns =
+    [
+        "id", "message_type", "destination", "payload", "payload_size", "content_type", "headers", "correlation_id", "causation_id",
+        "status", "attempt_count", "created_at", "scheduled_at", "available_at", "lock_token", "locked_by", "last_attempt_at",
+        "delivered_at", "dead_lettered_at", "last_error", "claim_at", "cleanup_at", "dead_at",
     ];
 
     /// <summary>IN lists are built in buckets of these sizes, padded by repeating the last value, so few statement texts exist.</summary>
@@ -51,7 +71,6 @@ internal sealed class MySqlOutboxSql
         TableName = tableName;
         Table = Qualify(tableName);
         VersionTable = Qualify(VersionTableName);
-        StatusConstraintName = BoundedName("ck_", tableName, "_status");
         ClaimIndexName = BoundedName("ix_", tableName, "_claim");
         CleanupIndexName = BoundedName("ix_", tableName, "_cleanup");
         DeadIndexName = BoundedName("ix_", tableName, "_dead");
@@ -63,15 +82,17 @@ internal sealed class MySqlOutboxSql
             .Replace("{{table}}", table, StringComparison.Ordinal)
             .Replace("{{table_name}}", tableName, StringComparison.Ordinal)
             .Replace("{{version_table}}", VersionTable, StringComparison.Ordinal)
-            .Replace("{{ck_status}}", Quote(StatusConstraintName), StringComparison.Ordinal)
             .Replace("{{ix_claim}}", Quote(ClaimIndexName), StringComparison.Ordinal)
             .Replace("{{ix_cleanup}}", Quote(CleanupIndexName), StringComparison.Ordinal)
             .Replace("{{ix_dead}}", Quote(DeadIndexName), StringComparison.Ordinal);
 
         // Step 1 of a claim (ADR 0006), inside a READ COMMITTED transaction: lock up to @batch_size due rows in claim order, skipping
-        // rows another claimer holds. The payload length lets the store apply the ADR 0004 budget.
+        // rows another claimer holds. payload_size is stored at insert, so the ADR 0004 budget needs no payload read (MY-01).
+        // FORCE INDEX keeps the claim an index range scan in claim_at order (MY-12): a sort would lock every due row for the whole
+        // claim. A missing index makes the claim fail loudly, as on SQL Server, and the health check reports it (MY-08).
         ClaimCandidates =
-            $"SELECT HEX(id), OCTET_LENGTH(payload) FROM {table} WHERE claim_at <= {Now} ORDER BY claim_at LIMIT @batch_size FOR UPDATE SKIP LOCKED";
+            $"SELECT HEX(id), payload_size FROM {table} FORCE INDEX ({Quote(ClaimIndexName)}) WHERE claim_at <= {Now} " +
+            "ORDER BY claim_at LIMIT @batch_size FOR UPDATE SKIP LOCKED";
 
         MarkDelivered =
             $"UPDATE {table} SET status = 2, delivered_at = {Now}, lock_token = NULL WHERE id = UNHEX(@id) AND lock_token = UNHEX(@lock_token)";
@@ -111,7 +132,19 @@ internal sealed class MySqlOutboxSql
         RequeueDeadLettered = RequeueMany(table, filterByType: false);
         RequeueDeadLetteredOfType = RequeueMany(table, filterByType: true);
 
-        HealthCheck = $"SELECT 1 FROM {table} LIMIT 1";
+        // MY-08: the table must answer and have the shape this provider needs: its three indexes and the columns its statements use.
+        // CREATE TABLE IF NOT EXISTS accepts an existing table of any shape, so EnsureCreatedAsync runs the same check afterwards.
+        var database = Schema is null ? "DATABASE()" : "'" + Schema + "'";
+        HealthCheck =
+            $"""
+            SELECT (SELECT 1 FROM {table} LIMIT 1),
+                   (SELECT COUNT(DISTINCT INDEX_NAME) FROM information_schema.STATISTICS
+                    WHERE TABLE_SCHEMA = {database} AND TABLE_NAME = '{tableName}'
+                      AND INDEX_NAME IN ('{ClaimIndexName}', '{CleanupIndexName}', '{DeadIndexName}')),
+                   (SELECT COUNT(*) FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = {database} AND TABLE_NAME = '{tableName}'
+                      AND COLUMN_NAME IN ({string.Join(", ", RequiredColumns.Select(c => "'" + c + "'"))}))
+            """;
     }
 
     public string? Schema { get; }
@@ -122,8 +155,6 @@ internal sealed class MySqlOutboxSql
     public string Table { get; }
 
     public string VersionTable { get; }
-
-    public string StatusConstraintName { get; }
 
     public string ClaimIndexName { get; }
 
@@ -169,7 +200,11 @@ internal sealed class MySqlOutboxSql
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(rows, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(rows, OutboxLimits.MaxEnqueueBatchSize);
-        return _inserts.GetOrAdd(rows, static (count, sql) => sql.BuildInsert(count), this);
+        // MY-03: only small statements are cached. Every row count up to 1,000 would hold about 259 MiB of text; a large insert is
+        // rare, and building its text costs little next to sending its rows.
+        return rows <= MaxCachedInsertRows
+            ? _inserts.GetOrAdd(rows, static (count, sql) => sql.BuildInsert(count), this)
+            : BuildInsert(rows);
     }
 
     /// <summary>
@@ -203,7 +238,10 @@ internal sealed class MySqlOutboxSql
             static (size, sql) => $"SELECT HEX(id), HEX(lock_token) FROM {sql.Table} WHERE id IN ({UnhexList("i", size)}) ORDER BY id FOR UPDATE",
             this);
 
-    /// <summary>ADR 0003 batch, step 2: changes exactly the matching rows, which step 1 holds locked. Parameters <c>@i0</c>...</summary>
+    /// <summary>
+    /// ADR 0003 batch, step 2: changes exactly the matching rows, which step 1 holds locked, guarded by (id, lock_token) pairs.
+    /// Parameters <c>@i0</c>.. and <c>@t0</c>...
+    /// </summary>
     public string GetBatchUpdate(int bucket, bool delivered) =>
         _batchUpdates.GetOrAdd(
             (bucket, delivered),
@@ -212,8 +250,12 @@ internal sealed class MySqlOutboxSql
                 (key.Delivered
                     ? $"status = 2, delivered_at = {Now}, lock_token = NULL"
                     : $"status = 0, available_at = {Now}, attempt_count = GREATEST(attempt_count - 1, 0), lock_token = NULL, locked_by = NULL") +
-                $" WHERE id IN ({UnhexList("i", key.Bucket)})",
+                $" WHERE (id, lock_token) IN ({PairList(key.Bucket)})",
             this);
+
+    /// <summary><c>(UNHEX(@i0), UNHEX(@t0)), ...</c>: each batch row is guarded by its own token in SQL as well (MY-06).</summary>
+    private static string PairList(int count) =>
+        string.Join(", ", Enumerable.Range(0, count).Select(i => $"(UNHEX(@i{i.ToString(CultureInfo.InvariantCulture)}), UNHEX(@t{i.ToString(CultureInfo.InvariantCulture)}))"));
 
     /// <summary>
     /// The admin page query: the narrow keys are filtered, sorted and paged first, then the page's full rows are fetched by primary

@@ -17,8 +17,14 @@ internal sealed class MySqlOutboxStore : IOutboxStore, IOutboxBatchStore
     /// <summary>Upper bound for intervals (about 54 years), far beyond any configurable delay or lease.</summary>
     private static readonly TimeSpan MaxInterval = TimeSpan.FromDays(20000);
 
+    /// <summary>Calls estimated below this size skip the packet check: every supported server allows at least 1 MiB (MY-02).</summary>
+    private const long PacketCheckThreshold = 1024 * 1024;
+
+    private static readonly TimeSpan PacketLimitCacheTime = TimeSpan.FromMinutes(5);
+
     private readonly MySqlConnectionSource _connections;
     private readonly MySqlOutboxSql _sql;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long Limit, DateTime ReadAt)> _packetLimits = new(StringComparer.Ordinal);
 
     public MySqlOutboxStore(MySqlConnectionSource connections, MySqlOutboxSql sql)
     {
@@ -28,6 +34,12 @@ internal sealed class MySqlOutboxStore : IOutboxStore, IOutboxBatchStore
 
     /// <summary>Error 1213/1205 retries by this store (see <see cref="MySqlConnectionSource"/>).</summary>
     internal long DeadlockRetries => _connections.DeadlockRetries;
+
+    /// <summary>
+    /// Test seam: how long a claim holds its locked candidates before leasing them. Always zero in production; tests use it to check
+    /// that producers can insert while a claim holds its locks (READ COMMITTED: no gap locks).
+    /// </summary>
+    internal TimeSpan ClaimTestPause { get; set; }
 
     // ---- Enqueue ---------------------------------------------------------------------------------------------------
 
@@ -52,16 +64,32 @@ internal sealed class MySqlOutboxStore : IOutboxStore, IOutboxBatchStore
     public async Task InsertAsync(DbConnection connection, DbTransaction? transaction, IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
     {
         ValidateCallerResources(connection, transaction);
-        ArgumentNullException.ThrowIfNull(records);
+        ValidateBatch(records);
+        var mySqlConnection = (MySqlConnection)connection;
         try
         {
+            // MY-07: an unqualified outbox table resolves to the connection's current database. Inserting into another database than
+            // the one DbRelay's dispatcher polls would store messages nobody delivers.
+            if (_sql.Schema is null)
+            {
+                var database = await _connections.GetDatabaseAsync(cancellationToken).ConfigureAwait(false);
+                if (!string.Equals(mySqlConnection.Database, database, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        $"The connection's current database ('{mySqlConnection.Database}') is not the database DbRelay's own connections use ('{database}'), " +
+                        "and MySqlOutboxOptions.Schema is not set, so the message would be stored where the dispatcher does not look. " +
+                        "Set MySqlOutboxOptions.Schema to the outbox database, or enqueue on a connection to that database.");
+                }
+            }
+
             // Exactly the caller's connection and transaction; DbRelay never opens, closes, commits, rolls back or disposes them.
-            await InsertCoreAsync((MySqlConnection)connection, (MySqlTransaction?)transaction, records, cancellationToken).ConfigureAwait(false);
+            await CheckPacketSizeAsync(mySqlConnection, (MySqlTransaction?)transaction, records, cancellationToken).ConfigureAwait(false);
+            await InsertCoreAsync(mySqlConnection, (MySqlTransaction?)transaction, records, cancellationToken).ConfigureAwait(false);
         }
-        catch (InvalidOperationException exception) when (transaction is null)
+        catch (InvalidOperationException exception) when (transaction is null && IsMissingTransactionError(exception))
         {
             // As CR-11 on SQL Server: MySqlConnector rejects a command without the connection's active transaction. DbRelay cannot
-            // adopt that transaction, so it explains the fix.
+            // adopt that transaction, so it explains the fix. Other InvalidOperationExceptions pass through unchanged (MY-10).
             throw new InvalidOperationException(
                 "The outbox insert was rejected because no transaction was passed while the connection has a transaction in progress. " +
                 "Pass that transaction to EnqueueAsync so the outbox row commits or rolls back with your business data. See the inner exception for MySqlConnector's message.",
@@ -75,15 +103,84 @@ internal sealed class MySqlOutboxStore : IOutboxStore, IOutboxBatchStore
 
     public Task InsertStandaloneAsync(IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(records);
+        ValidateBatch(records);
         return _connections.ExecuteAsync(
             async (connection, ct) =>
             {
+                await CheckPacketSizeAsync(connection, null, records, ct).ConfigureAwait(false);
                 await InsertCoreAsync(connection, null, records, ct).ConfigureAwait(false);
                 return true;
             },
             cancellationToken);
     }
+
+    /// <summary>
+    /// MY-14: one call is one atomic statement, so the storage interface accepts at most <see cref="OutboxLimits.MaxEnqueueBatchSize"/>
+    /// records per call (DbRelay's own enqueue API never sends more).
+    /// </summary>
+    private static void ValidateBatch(IReadOnlyList<OutboxRecord> records)
+    {
+        ArgumentNullException.ThrowIfNull(records);
+        if (records.Count > OutboxLimits.MaxEnqueueBatchSize)
+        {
+            throw new ArgumentOutOfRangeException(nameof(records), records.Count, $"At most {OutboxLimits.MaxEnqueueBatchSize} records per insert.");
+        }
+    }
+
+    /// <summary>
+    /// MY-02: a statement larger than the server's <c>max_allowed_packet</c> makes the server close the connection, which on the
+    /// caller's connection would end their transaction. A call that could come close is checked against the server's limit first,
+    /// and rejected with an explanation instead, leaving the connection and transaction intact. The size is estimated
+    /// conservatively: MySqlConnector sends binary values escaped (at most two bytes per byte) and text as UTF-8 (at most four
+    /// bytes per character).
+    /// </summary>
+    private async Task CheckPacketSizeAsync(MySqlConnection connection, MySqlTransaction? transaction, IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
+    {
+        long estimate = 0;
+        foreach (var record in records)
+        {
+            estimate += 400 + (2L * record.Payload.Length)
+                + (4L * ((record.HeadersJson?.Length ?? 0) + record.MessageType.Length + record.ContentType.Length
+                    + (record.Destination?.Length ?? 0) + (record.CorrelationId?.Length ?? 0) + (record.CausationId?.Length ?? 0)));
+        }
+
+        if (estimate < PacketCheckThreshold)
+        {
+            return; // every supported server allows at least this much
+        }
+
+        var limit = await GetMaxAllowedPacketAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+        if (estimate > limit)
+        {
+            throw new InvalidOperationException(
+                $"This enqueue call is too large for the server: its statement may be up to {estimate:N0} bytes, and the server's max_allowed_packet is {limit:N0} bytes. " +
+                "Enqueue the messages in several calls (in the same transaction if they must commit together), or raise max_allowed_packet. Nothing was sent.");
+        }
+    }
+
+    /// <summary>The server's <c>max_allowed_packet</c>, read on the given connection and cached per server for a few minutes.</summary>
+    private async Task<long> GetMaxAllowedPacketAsync(MySqlConnection connection, MySqlTransaction? transaction, CancellationToken cancellationToken)
+    {
+        var key = connection.DataSource ?? string.Empty;
+        if (_packetLimits.TryGetValue(key, out var cached) && cached.ReadAt > DateTime.UtcNow - PacketLimitCacheTime)
+        {
+            return cached.Limit;
+        }
+
+        var command = _connections.CreateCommand(connection, MySqlOutboxSql.MaxAllowedPacket, transaction);
+        await using (command.ConfigureAwait(false))
+        {
+            var limit = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
+            _packetLimits[key] = (limit, DateTime.UtcNow);
+            return limit;
+        }
+    }
+
+    /// <summary>MySqlConnector's error for a command without the connection's active transaction (MY-10).</summary>
+    private static bool IsMissingTransactionError(InvalidOperationException exception) =>
+        exception.Message.Contains("transaction", StringComparison.OrdinalIgnoreCase)
+        && !exception.Message.Contains("max_allowed_packet", StringComparison.Ordinal)
+        && !exception.Message.Contains("current database", StringComparison.Ordinal);
 
     /// <summary>
     /// One multi-row INSERT per <see cref="OutboxLimits.MaxEnqueueBatchSize"/> rows, each atomic on its own, so DbRelay never begins,
@@ -131,11 +228,11 @@ internal sealed class MySqlOutboxStore : IOutboxStore, IOutboxBatchStore
 
         ArgumentOutOfRangeException.ThrowIfLessThan(request.MaxPayloadBytes, 1L, nameof(request));
         return _connections.ExecuteInTransactionAsync<IReadOnlyList<OutboxMessageDetails>>(
-            async (connection, transaction, ct) =>
+            async (connection, ct) =>
             {
                 // 1. Lock due candidates in claim order, skipping rows other claimers hold.
                 var chosen = new List<Guid>(request.BatchSize);
-                var candidates = _connections.CreateCommand(connection, _sql.ClaimCandidates, transaction);
+                var candidates = _connections.CreateCommand(connection, _sql.ClaimCandidates);
                 await using (candidates.ConfigureAwait(false))
                 {
                     candidates.Parameters.Add(Number("@batch_size", request.BatchSize));
@@ -163,9 +260,14 @@ internal sealed class MySqlOutboxStore : IOutboxStore, IOutboxBatchStore
                     return [];
                 }
 
+                if (ClaimTestPause > TimeSpan.Zero)
+                {
+                    await Task.Delay(ClaimTestPause, ct).ConfigureAwait(false);
+                }
+
                 // 3. Lease them and count the attempt.
                 var bucket = MySqlOutboxSql.BucketFor(chosen.Count);
-                var lease = _connections.CreateCommand(connection, _sql.GetClaimUpdate(bucket), transaction);
+                var lease = _connections.CreateCommand(connection, _sql.GetClaimUpdate(bucket));
                 await using (lease.ConfigureAwait(false))
                 {
                     AddIds(lease.Parameters, chosen, bucket);
@@ -177,7 +279,7 @@ internal sealed class MySqlOutboxStore : IOutboxStore, IOutboxBatchStore
 
                 // 4. Read the leased rows; only rows this claim changed carry its token.
                 var rows = new Dictionary<Guid, OutboxMessageDetails>(chosen.Count);
-                var select = _connections.CreateCommand(connection, _sql.GetClaimedRows(bucket), transaction);
+                var select = _connections.CreateCommand(connection, _sql.GetClaimedRows(bucket));
                 await using (select.ConfigureAwait(false))
                 {
                     AddIds(select.Parameters, chosen, bucket);
@@ -276,11 +378,11 @@ internal sealed class MySqlOutboxStore : IOutboxStore, IOutboxBatchStore
 
         var ids = items.Select(i => i.MessageId).Distinct().OrderBy(HexOf, StringComparer.Ordinal).ToList();
         return await _connections.ExecuteInTransactionAsync<IReadOnlyCollection<OutboxAcknowledgement>>(
-            async (connection, transaction, ct) =>
+            async (connection, ct) =>
             {
                 var bucket = MySqlOutboxSql.BucketFor(ids.Count);
                 var current = new Dictionary<Guid, Guid?>(ids.Count);
-                var lockCommand = _connections.CreateCommand(connection, _sql.GetLockForBatch(bucket), transaction);
+                var lockCommand = _connections.CreateCommand(connection, _sql.GetLockForBatch(bucket));
                 await using (lockCommand.ConfigureAwait(false))
                 {
                     AddIds(lockCommand.Parameters, ids, bucket);
@@ -300,13 +402,28 @@ internal sealed class MySqlOutboxStore : IOutboxStore, IOutboxBatchStore
                     return matched;
                 }
 
-                var matchedIds = matched.Select(i => i.MessageId).Distinct().OrderBy(HexOf, StringComparer.Ordinal).ToList();
-                var updateBucket = MySqlOutboxSql.BucketFor(matchedIds.Count);
-                var update = _connections.CreateCommand(connection, _sql.GetBatchUpdate(updateBucket, delivered), transaction);
+                // A message ID appears at most once among the matches: a row has one current token.
+                var pairs = matched.OrderBy(i => HexOf(i.MessageId), StringComparer.Ordinal).ToList();
+                var updateBucket = MySqlOutboxSql.BucketFor(pairs.Count);
+                var update = _connections.CreateCommand(connection, _sql.GetBatchUpdate(updateBucket, delivered));
                 await using (update.ConfigureAwait(false))
                 {
-                    AddIds(update.Parameters, matchedIds, updateBucket);
-                    await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    for (var i = 0; i < updateBucket; i++)
+                    {
+                        var pair = pairs[Math.Min(i, pairs.Count - 1)]; // pad by repeating the last pair
+                        var n = i.ToString(CultureInfo.InvariantCulture);
+                        update.Parameters.Add(Hex("@i" + n, pair.MessageId));
+                        update.Parameters.Add(Hex("@t" + n, pair.LockToken));
+                    }
+
+                    // MY-06: each row is guarded by its own (id, lock_token) pair in SQL too, and every matched row must have changed. The
+                    // rows are locked by the step above, so a difference means the database changed them anyway: roll back instead.
+                    var changed = await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    if (changed != pairs.Count)
+                    {
+                        throw new InvalidOperationException(
+                            $"A batched acknowledgement changed {changed} rows instead of the {pairs.Count} it had locked; nothing was changed.");
+                    }
                 }
 
                 return matched;
@@ -484,16 +601,13 @@ internal sealed class MySqlOutboxStore : IOutboxStore, IOutboxBatchStore
         return total;
     }
 
+    /// <summary>The table must answer and have the indexes and columns this provider uses (MY-08).</summary>
     public Task CheckHealthAsync(CancellationToken cancellationToken) =>
         _connections.ExecuteAsync(
             async (connection, ct) =>
             {
-                var command = _connections.CreateCommand(connection, _sql.HealthCheck);
-                await using (command.ConfigureAwait(false))
-                {
-                    await command.ExecuteScalarAsync(ct).ConfigureAwait(false);
-                    return true;
-                }
+                await MySqlOutboxSchemaManager.VerifyShapeAsync(_connections, connection, _sql, ct).ConfigureAwait(false);
+                return true;
             },
             cancellationToken);
 
@@ -515,9 +629,9 @@ internal sealed class MySqlOutboxStore : IOutboxStore, IOutboxBatchStore
     /// <summary>One statement in its own READ COMMITTED transaction (no gap locks on the scanned range).</summary>
     private Task<int> ExecuteInTransactionAsync(string sql, Action<MySqlParameterCollection> addParameters, CancellationToken cancellationToken) =>
         _connections.ExecuteInTransactionAsync(
-            async (connection, transaction, ct) =>
+            async (connection, ct) =>
             {
-                var command = _connections.CreateCommand(connection, sql, transaction);
+                var command = _connections.CreateCommand(connection, sql);
                 await using (command.ConfigureAwait(false))
                 {
                     addParameters(command.Parameters);

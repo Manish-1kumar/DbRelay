@@ -10,19 +10,21 @@
 --   {{table}}          quoted, optionally database-qualified outbox table   (default `outbox_messages`)
 --   {{table_name}}     outbox table name                                    (default outbox_messages)
 --   {{version_table}}  quoted, optionally database-qualified version table  (default `dbrelay_schema_version`)
---   {{ck_status}}      status check constraint name                         (default ck_outbox_messages_status)
 --   {{ix_claim}}       claim index name                                     (default ix_outbox_messages_claim)
 --   {{ix_cleanup}}     retention cleanup index name                         (default ix_outbox_messages_cleanup)
 --   {{ix_dead}}        dead-letter index name                               (default ix_outbox_messages_dead)
 --
 -- Neither engine has partial indexes. The indexes are on virtual generated columns that are NULL for rows of other statuses, and
 -- DbRelay's statements filter and order on those columns, so each lookup reads only the rows it needs.
+--
+-- payload_size is stored once at insert, so a claim can apply its payload budget without reading the payloads (MY-01).
 
 CREATE TABLE IF NOT EXISTS {{table}} (
     id               BINARY(16)   NOT NULL,
     message_type     VARCHAR(256) NOT NULL,
     destination      VARCHAR(512) NULL,
     payload          LONGBLOB     NOT NULL,
+    payload_size     BIGINT       AS (OCTET_LENGTH(payload)) STORED,
     content_type     VARCHAR(128) NOT NULL,
     headers          MEDIUMTEXT   NULL,
     correlation_id   VARCHAR(128) NULL,
@@ -48,7 +50,9 @@ CREATE TABLE IF NOT EXISTS {{table}} (
     KEY {{ix_cleanup}} (cleanup_at),
     -- Dead-letter inspection and bulk requeue (oldest first).
     KEY {{ix_dead}} (dead_at),
-    CONSTRAINT {{ck_status}} CHECK (status BETWEEN 0 AND 3)
+    -- Unnamed: MySQL names it <table>_chk_1 and renames it with the table, so re-creating the table after a RENAME TABLE
+    -- never collides with the old constraint (MY-09).
+    CHECK (status BETWEEN 0 AND 3)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
 
 CREATE TABLE IF NOT EXISTS {{version_table}} (

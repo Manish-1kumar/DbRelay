@@ -244,7 +244,8 @@ jobs:
       - name: Oracle provider tests (net10.0)
         run: dotnet test --project tests/DbRelay.Oracle.Tests -c Release -f net10.0
 
-  # MySQL 8.4 runs in build-test. MySQL 8.0 covers Aurora MySQL 3 and RDS for MySQL 8.0; MariaDB 10.11 and 11.4 are its LTS lines.
+  # MySQL 8.4 runs in build-test. MySQL 8.0 covers Aurora MySQL 3 and RDS for MySQL 8.0; MySQL 9 is the innovation line.
+  # MariaDB 10.11, 11.4 and 11.8 are its LTS lines; 11.8 turns innodb_snapshot_isolation on by default (MY-11).
   mysql-compat:
     name: ${{ matrix.db.name }} compatibility
     runs-on: ubuntu-latest
@@ -256,6 +257,8 @@ jobs:
           - { name: "MySQL 8.0", image: "mysql:8.0", health: "mysqladmin ping -h 127.0.0.1 -uroot -pDbRelay_CI_Pa55w0rd --silent" }
           - { name: "MariaDB 10.11", image: "mariadb:10.11", health: "healthcheck.sh --connect --innodb_initialized" }
           - { name: "MariaDB 11.4", image: "mariadb:11.4", health: "healthcheck.sh --connect --innodb_initialized" }
+          - { name: "MariaDB 11.8", image: "mariadb:11.8", health: "healthcheck.sh --connect --innodb_initialized" }
+          - { name: "MySQL 9", image: "mysql:9", health: "mysqladmin ping -h 127.0.0.1 -uroot -pDbRelay_CI_Pa55w0rd --silent" }
     services:
       mysql:
         image: ${{ matrix.db.image }}
