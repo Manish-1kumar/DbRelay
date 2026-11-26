@@ -159,19 +159,23 @@ internal sealed class OracleOutboxSql
 
         SelectById = $"SELECT {_columns} FROM {table} WHERE ID = :id";
 
-        // One scalar subquery per status. Each predicate repeats an index expression (claim: STATUS IN (0, 1); cleanup: STATUS = 2;
-        // dead: STATUS = 3) and is hinted to it, so no count scans the table, whatever the optimizer statistics say.
+        // Each count reads only its function-based index (claim: STATUS IN (0, 1); cleanup: STATUS = 2; dead: STATUS = 3), hinted, so
+        // no count scans the table whatever the optimizer statistics say. Pending and processing come from one scan of the claim
+        // index: it holds exactly those rows, and its second key is the status (0 or 1), so its sum is the processing count.
+        // (Comparing that key to a constant does not work: the optimizer simplifies "CASE ... END = 0" to "STATUS = 0", which no
+        // longer matches the index, and scans the table.)
         Statistics =
             $"""
             SELECT
-                (SELECT {Hint("INDEX_FFS", ClaimIndexName)} COUNT(*) FROM {table} t WHERE {ClaimStatusKey} = 0),
-                (SELECT {Hint("INDEX_FFS", ClaimIndexName)} COUNT(*) FROM {table} t WHERE {ClaimStatusKey} = 1),
+                c.total - c.processing,
+                c.processing,
                 (SELECT {Hint("INDEX_FFS", CleanupIndexName)} COUNT(*) FROM {table} t WHERE {CleanupKey} IS NOT NULL),
                 (SELECT {Hint("INDEX_FFS", DeadIndexName)} COUNT(*) FROM {table} t WHERE {DeadKey} IS NOT NULL),
                 (SELECT EXTRACT(DAY FROM age) * 86400000 + EXTRACT(HOUR FROM age) * 3600000 + EXTRACT(MINUTE FROM age) * 60000
                         + ROUND(EXTRACT(SECOND FROM age) * 1000)
                  FROM (SELECT {Hint("INDEX", ClaimIndexName)} {Now} - MIN({ClaimKey}) AS age FROM {table} t WHERE {ClaimKey} <= {Now}))
-            FROM DUAL
+            FROM (SELECT {Hint("INDEX_FFS", ClaimIndexName)} COUNT(*) AS total, NVL(SUM({ClaimStatusKey}), 0) AS processing
+                  FROM {table} t WHERE {ClaimKey} IS NOT NULL) c
             """;
 
         Requeue =
