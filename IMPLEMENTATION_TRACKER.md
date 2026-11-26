@@ -25,7 +25,8 @@ implementing agent reported.
 | T13.1 | Production-readiness audit | code-reviewer | COMPLETED | 1,140 test runs after FU fixes, 0 failed | Initial review, follow-up audit (FU-01..FU-10) and resolution logs in CODE_REVIEW_REPORT.md | No independent re-audit of the FU fixes |
 | T15.1 | Batched acknowledgements + `IOutboxBatchStore` (ADR 0003) | Architect | REVIEWED | Unit 416/416 (104 × 4 TFMs); conformance batch tests on PG and SQL (RCSI off/on); interleaved A/B throughput (`docs/benchmarks.md` §3) | BA review: 0 Critical/High; BA-01..BA-12 fixed or accepted; BA-02 and the lost-wake-up fix mutation-checked | BA-05 bounded hand-off and BA-07 lock stress test deferred |
 | T16.1 | Soak/chaos harness and long runs | Architect | COMPLETED | PostgreSQL 2 h, SQL Server 1 h, PostgreSQL 30 min (final code): PASS 9/9 each, 0 lost (`docs/soak/`) | | Single machine; SQL Server Express |
-| T14.1 | Release candidate | Architect | IN PROGRESS | | | See RELEASE_CHECKLIST.md owner actions |
+| T14.1 | Release 0.1.0 | Architect | COMPLETED | Publish run 45692836402; installed from nuget.org and delivered end to end | | `DbRelay.SqlServer` not packed (0.2.0) |
+| T17.1 | 0.2.0: `DbRelay.SqlServer` package, 0.1.0 package-validation baseline, SQL Server 2019/2025 CI jobs | Architect | IMPLEMENTED - NOT VERIFIED | Local: build 0 warnings; 4 packages packed; baseline validation mutation-checked (a removed public member fails the pack) | | SQL Server 2019/2025 jobs not run yet (need a push); Azure SQL untested (K7) |
 
 ## Bugs found and fixed
 

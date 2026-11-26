@@ -142,3 +142,46 @@ jobs:
         run: dotnet test --project tests/DbRelay.PostgreSql.Tests -c Release -f net10.0
       - name: Integration tests (net10.0)
         run: dotnet test --project tests/DbRelay.IntegrationTests -c Release -f net10.0
+
+  # SQL Server 2022 runs in build-test. The provider suite runs with and without READ_COMMITTED_SNAPSHOT on each version.
+  sqlserver-compat:
+    name: SQL Server ${{ matrix.sqlserver }} compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        sqlserver: ["2019", "2025"]
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:${{ matrix.sqlserver }}-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: ${{ env.MSSQL_SA_PASSWORD }}
+        ports: ["1433:1433"]
+        # Older images ship sqlcmd under mssql-tools, newer ones under mssql-tools18.
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' -b || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' -b"
+          --health-interval 10s --health-timeout 5s --health-retries 30
+    env:
+      DBRELAY_TEST_SQLSERVER: "Server=localhost,1433;User ID=sa;Password=DbRelay_CI_Pa55w0rd!;TrustServerCertificate=true;Database=dbrelay_tests"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            10.0.x
+            11.0.x
+      - uses: actions/cache@v6
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', '**/*.csproj', 'global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+      - name: Create SQL Server test database and record the version
+        run: |
+          id=${{ job.services.mssql.id }}
+          if docker exec "$id" test -x /opt/mssql-tools18/bin/sqlcmd; then sqlcmd="/opt/mssql-tools18/bin/sqlcmd -C"; else sqlcmd="/opt/mssql-tools/bin/sqlcmd"; fi
+          docker exec "$id" $sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -b \
+            -Q "IF DB_ID('dbrelay_tests') IS NULL CREATE DATABASE dbrelay_tests; SELECT @@VERSION;"
+      - name: SQL Server provider tests (net10.0)
+        run: dotnet test --project tests/DbRelay.SqlServer.Tests -c Release -f net10.0
