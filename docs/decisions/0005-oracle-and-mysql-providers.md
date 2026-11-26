@@ -47,13 +47,13 @@ The API mirrors the other providers; nothing new is added to the core packages.
 
 | Column | Type | Note |
 |---|---|---|
-| `ID`, `LOCK_TOKEN` | `RAW(16)` | Bound as `Guid.ToByteArray()` |
+| `ID`, `LOCK_TOKEN` | `RAW(16)` | Bound as `Guid.ToByteArray()`; a check constraint requires `ID` to be 16 bytes (OR-06) |
 | `PAYLOAD` | `BLOB` | |
-| `HEADERS`, `LAST_ERROR` | `CLOB` | 2,000 characters can exceed 4,000 bytes in AL32UTF8 |
-| Text columns | `VARCHAR2(n CHAR)` | Same lengths as SQL Server |
+| `HEADERS`, `LAST_ERROR` | `NCLOB` | Unicode whatever the database character set (OR-08) |
+| Text columns | `NVARCHAR2(n)` | Same lengths as SQL Server; Unicode whatever the database character set (OR-08) |
 | `STATUS` | `NUMBER(1)` | With a check constraint |
 | `ATTEMPT_COUNT` | `NUMBER(10)` | |
-| Times | `TIMESTAMP(3)` | UTC |
+| Times | `TIMESTAMP(6)` | UTC. Microseconds, so a stored time is never rounded up past the database clock |
 
 ### Database clock and intervals
 - **Clock:** every time is `SYS_EXTRACT_UTC(SYSTIMESTAMP)` (invariant 5). The application clock is never used.
@@ -78,10 +78,12 @@ Oracle has none. Function-based indexes give the same effect, because a key that
 ### Claim
 `FOR UPDATE ... SKIP LOCKED` cannot be combined with `FETCH FIRST` or `ROWNUM` without returning too few rows, so the claim
 is **one anonymous PL/SQL block**, autocommitted as one statement:
-1. It opens a cursor `SELECT ... ORDER BY <claim expression>, ID FOR UPDATE SKIP LOCKED` and fetches row by row. Rows are
+1. It opens a cursor `SELECT ... ORDER BY <claim expression> FOR UPDATE SKIP LOCKED` and fetches row by row. Rows are
    locked as they are fetched.
 2. It stops at the batch size, or at the payload budget (ADR 0004): `DBMS_LOB.GETLENGTH`, with the first row always taken.
-3. It updates each fetched row: lock token, worker, attempt + 1 (invariant 10), and a lease ending at `now + lease`.
+3. It updates each fetched row: lock token, worker, attempt + 1 (invariant 10), and a lease ending at `now + lease`. The
+   update re-checks `STATUS IN (0, 1) AND AVAILABLE_AT <= now` on the row it locked, and only rows it changed are claimed (OR-01).
+   The cursor chose the row from its read snapshot, so a row changed in between is never claimed twice.
 4. It returns the claimed IDs in claim order, as one string of 32 hex digits per ID (32,000 characters for the maximum batch of
    1,000, within `VARCHAR2(32767)`). It also returns a `REF CURSOR` over the claimed rows, found through the claim index:
    every claimed row has the same new `AVAILABLE_AT` and the claim's lock token. This avoids PL/SQL array binds, whose type

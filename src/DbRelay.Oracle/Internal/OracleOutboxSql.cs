@@ -59,6 +59,7 @@ internal sealed class OracleOutboxSql
         VersionTable = Qualify(VersionTableName);
         PrimaryKeyName = BoundedName("PK_", TableName, string.Empty);
         StatusConstraintName = BoundedName("CK_", TableName, "_STATUS");
+        IdConstraintName = BoundedName("CK_", TableName, "_ID");
         ClaimIndexName = BoundedName("IX_", TableName, "_CLAIM");
         CleanupIndexName = BoundedName("IX_", TableName, "_CLEANUP");
         DeadIndexName = BoundedName("IX_", TableName, "_DEAD");
@@ -72,6 +73,7 @@ internal sealed class OracleOutboxSql
             .Replace("{{version_table}}", VersionTable, StringComparison.Ordinal)
             .Replace("{{pk}}", PrimaryKeyName, StringComparison.Ordinal)
             .Replace("{{ck_status}}", StatusConstraintName, StringComparison.Ordinal)
+            .Replace("{{ck_id}}", IdConstraintName, StringComparison.Ordinal)
             .Replace("{{ix_claim}}", Qualify(ClaimIndexName), StringComparison.Ordinal)
             .Replace("{{ix_cleanup}}", Qualify(CleanupIndexName), StringComparison.Ordinal)
             .Replace("{{ix_dead}}", Qualify(DeadIndexName), StringComparison.Ordinal);
@@ -103,13 +105,18 @@ internal sealed class OracleOutboxSql
                     FETCH c_due INTO v_rid, v_id, v_size;
                     EXIT WHEN c_due%NOTFOUND;
                     EXIT WHEN v_count > 0 AND v_bytes >= :max_payload_bytes;
+                    -- OR-01: the cursor chose this row from its read snapshot, but locked the current version at fetch time. Re-check
+                    -- the claim condition against that current version, so a row another session claimed or acknowledged in between is
+                    -- never claimed twice, and count only rows actually updated.
                     UPDATE {table}
                        SET STATUS = 1, LOCK_TOKEN = :lock_token, LOCKED_BY = :worker_id, ATTEMPT_COUNT = ATTEMPT_COUNT + 1,
                            LAST_ATTEMPT_AT = v_now, AVAILABLE_AT = v_until
-                     WHERE ROWID = v_rid;
-                    v_count := v_count + 1;
-                    v_bytes := v_bytes + v_size;
-                    v_ids := v_ids || RAWTOHEX(v_id);
+                     WHERE ROWID = v_rid AND STATUS IN (0, 1) AND AVAILABLE_AT <= v_now;
+                    IF SQL%ROWCOUNT = 1 THEN
+                        v_count := v_count + 1;
+                        v_bytes := v_bytes + v_size;
+                        v_ids := v_ids || RAWTOHEX(v_id);
+                    END IF;
                     EXIT WHEN v_count >= :batch_size;
                 END LOOP;
                 CLOSE c_due;
@@ -201,6 +208,8 @@ internal sealed class OracleOutboxSql
 
     public string StatusConstraintName { get; }
 
+    public string IdConstraintName { get; }
+
     public string ClaimIndexName { get; }
 
     public string CleanupIndexName { get; }
@@ -210,7 +219,7 @@ internal sealed class OracleOutboxSql
     /// <summary>The script for people and migration tools (ends with a SQL*Plus <c>/</c>).</summary>
     public string CreateScript { get; }
 
-    /// <summary>The script as one executable PL/SQL block (comments and the trailing <c>/</c> removed, LF line endings).</summary>
+    /// <summary>The script as one executable PL/SQL block: from <c>DECLARE</c> to the final <c>END;</c>, so the header comments and the trailing <c>/</c> are removed, with LF line endings.</summary>
     public string CreateBlock { get; }
 
     public string Claim { get; }

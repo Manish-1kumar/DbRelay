@@ -83,6 +83,10 @@ Oracle does not store, so each index stays as small as a partial index would be.
 - **Claims** use `FOR UPDATE SKIP LOCKED` in a PL/SQL block that fetches and locks one row at a time, so concurrent
   dispatchers never wait for each other or claim the same message.
 - **Times** are `TIMESTAMP(6)` in UTC, read from the database clock (`SYS_EXTRACT_UTC(SYSTIMESTAMP)`).
+- **Text is Unicode whatever the database character set:** text columns are `NVARCHAR2` and `NCLOB`, so message types,
+  headers and errors survive even on a database created with a single-byte character set such as `WE8MSWIN1252`.
+- **No session settings are changed.** DbRelay's connections may come from a pool you share, so it never runs
+  `ALTER SESSION`.
 
 ## Permissions
 

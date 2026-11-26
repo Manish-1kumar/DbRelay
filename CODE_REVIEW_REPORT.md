@@ -1336,3 +1336,415 @@ Each item was re-run on all four target frameworks. Mutation checks: the fix was
 **Results:** 0 failures in 96 stress runs with all fixes. Mutation checks were **inconclusive**. Reproduction depends on machine load: the unfixed code failed 5 of 48 runs at one time and 0 of 48 later. The deadlock graphs are the evidence for cycles 1 and 2.
 
 **Also found:** two 1205 reports from 09:08 UTC came from the BA review harness's explicit-transaction scenario, not from a production path. A targeted repro of duplicate items gave 0 deadlocks in 12,000 parameterized statements.
+
+---
+
+## Oracle provider review (ADR 0005), 2026-11-26
+
+Independent review of branch `oracle-provider` (`git diff main...oracle-provider`, at `525d83c`; the last commit changed only
+documentation, not code or tests). Scope:
+- `src/DbRelay.Oracle/**`;
+- `tests/DbRelay.Oracle.Tests/**`;
+- the hooks added to `tests/DbRelay.Storage.Conformance/OutboxStoreConformanceTests.cs` and `tests/Shared/TestSchemaNames.cs`.
+
+The PostgreSQL and SQL Server providers were the reference.
+
+**Evidence limits.** I could not run Oracle. There is no Docker and no Oracle instance on this machine, so none of the
+55 database tests ran here and I make no claim that they pass. The CI result the caller cites (run 45872607007: 82/82 on
+23ai Free and 21c XE, 0 skipped) is the only database evidence, and I did not re-verify it. A finding marked "Reasoned"
+comes from reading the code and from documented Oracle or ODP.NET behaviour. Where I was unsure what Oracle or ODP.NET
+does, the finding says so, together with the test that would settle it.
+
+### Test results (run by me)
+
+| Command | Result |
+|---|---|
+| `dotnet build tests/DbRelay.Oracle.Tests/DbRelay.Oracle.Tests.csproj -c Release` | Build succeeded, 0 warnings, 0 errors (net8.0, net9.0, net10.0, net11.0) |
+| `dotnet test --project tests/DbRelay.Oracle.Tests -c Release -f net10.0 --no-build` (without `DBRELAY_TEST_ORACLE`) | total 82: **27 succeeded** (registration, naming, script and SQL-shape tests), **55 skipped** ("No Oracle database available"), 0 failed |
+
+### What was checked and found sound
+
+- **Invariant 1 (caller-owned resources).** `InsertAsync` never opens, closes or disposes the caller's connection, and
+  never commits, rolls back or disposes a transaction the caller passed.
+  - The only transaction DbRelay commits on a caller connection is one it began itself (OR-04).
+  - ODP.NET autocommits every command when there is no `OracleTransaction`, so such a connection has no pending caller work
+    that DbRelay's commit could include.
+- **Invariant 2 (caller's connection and transaction).**
+  - Core `Outbox.ValidateCallerResources` checks the pairing (`transaction.Connection` is the supplied connection) and
+    rejects a completed transaction.
+  - The provider checks the types.
+  - Commands do not set `OracleCommand.Transaction`, which is correct for ODP.NET: it runs every command in the
+    connection's transaction.
+- **Invariant 3 (no transaction during handler calls).** Every dispatcher-path operation is one autocommitted statement or
+  anonymous block. The claim's REF CURSOR is read after the block has committed, and it is not a `FOR UPDATE` cursor.
+- **Invariant 4 (lock-token guards).**
+  - `MarkDelivered`, `ScheduleRetry`, `MarkDeadLettered` and `Release` are guarded by `WHERE ID = :id AND LOCK_TOKEN = :lock_token`.
+  - The batch variants guard each FORALL element with its own token, and `SQL%BULK_ROWCOUNT(i)` reports each element.
+  - Every terminal transition clears `LOCK_TOKEN`, so a token match implies status 1. That makes the missing
+    `AND STATUS = 1` (which SQL Server has) harmless.
+- **Invariant 5 (database clock).** Every time is `SYS_EXTRACT_UTC(SYSTIMESTAMP)`. Intervals are bound as milliseconds and
+  converted with `NUMTODSINTERVAL(ms / 1000, 'SECOND')`, which is exact in `NUMBER` arithmetic. The application clock is
+  used only for the caller-supplied `DeliverAt`, which is a value, not a comparison.
+- **Lease equality.** `v_until` (`TIMESTAMP(6)`) is stored into a `TIMESTAMP(6)` column, so the result cursor's equality
+  `CASE ... END = v_until` cannot lose precision.
+- **Invariants 7 to 10.**
+  - No type is activated from database strings.
+  - All values are bind parameters.
+  - Identifiers pass `SqlIdentifier` (`[A-Za-z_][A-Za-z0-9_]{0,62}`), are upper-cased and double-quoted. Index names in
+    hints are unquoted upper-case `[A-Z0-9_]` names that start with `IX_`.
+  - Nothing is logged by the provider, and error text is truncated in core (`ErrorText`) and again to `MaxErrorLength`.
+  - Attempts are incremented in the claim block itself.
+- **Claim block.**
+  - Explicit single-row `FETCH` is correct: a cursor FOR loop would bulk-fetch 100 rows and, with `SKIP LOCKED`, lock rows
+    it never claims.
+  - The payload-budget check (`v_count > 0 AND v_bytes >= :max_payload_bytes`, with `v_bytes` the sum *before* the current
+    row) matches the `IOutboxStore.ClaimAsync` contract and ADR 0004.
+  - The row that trips the budget has been fetched, so it is locked, but it is not updated. Its lock ends when the block
+    commits, as on PostgreSQL.
+  - The claim-order string is 32 hex digits times at most 1,000 ids, which is 32,000 bytes, within `VARCHAR2(32767)`.
+  - The output parameter is sized 32,767. The batch strings (32,000 characters in, 1,000 flags out) fit too.
+- **Atomicity and retry.** An unhandled exception in a client-submitted anonymous block rolls back the whole block
+  (statement-level atomicity of the top-level call). Retrying ORA-00060 is therefore safe for the claim, the guarded
+  updates, the batch blocks, cleanup and requeue.
+  - The >90-row `InsertStandaloneAsync` is several statements in DbRelay's own transaction. On ORA-00060 that transaction
+    is rolled back by `DisposeAsync` before the retry, so it is safe too. The XML comment on `ExecuteAsync` saying "every
+    operation is a single autocommitted statement" is slightly inaccurate (OR-10).
+- **BA-07 ordering.** Unsigned lexicographic comparison of `Guid.ToByteArray()` is the order Oracle compares `RAW(16)` in,
+  and FORALL runs its elements in index order. Claims, cleanup and bulk requeue use `SKIP LOCKED`, so they never wait.
+- **`''` is NULL.**
+  - `NVL(:pl, EMPTY_BLOB())` keeps the `NOT NULL` payload column valid for empty payloads.
+  - An empty `Destination`, `CorrelationId` or `CausationId` reads back as null. This is documented (K17).
+- **Schema script.** Each object is created by its own `EXECUTE IMMEDIATE`, and "already exists" codes are ignored.
+  Re-running the whole block after ORA-04020, ORA-04021 or ORA-00054 only creates what is missing. The retry is bounded
+  (5 attempts, with jitter).
+- **Resources and async.**
+  - Commands, readers, the REF CURSOR on the non-empty path, connections and DbRelay's own transaction are disposed.
+  - `ConfigureAwait(false)` is used throughout.
+  - The only synchronous call is `BeginTransaction()`. ODP.NET makes no round trip for it at the default isolation level.
+- **Packaging.** `IsPackable` is false unless `-p:DbRelayPackOracle=true`, so a release tag cannot publish the package
+  without approval.
+
+### Findings
+
+| Severity | Count | IDs |
+|---|---|---|
+| Critical | 0 | none |
+| High | 0 | none |
+| Medium | 3 | OR-01, OR-02, OR-03 |
+| Low | 6 | OR-04, OR-05, OR-06, OR-07, OR-08, OR-09 |
+| Info | 4 | OR-10, OR-11, OR-12, OR-13 |
+
+#### OR-01 (Medium): the claim UPDATE does not re-check that the row is still due, so it relies on Oracle's fetch-time re-check under `SKIP LOCKED`
+
+- **File:** `src/DbRelay.Oracle/Internal/OracleOutboxSql.cs:101-113` (`UPDATE ... WHERE ROWID = v_rid`); cursor at `:343-345`
+- **Failure scenario:**
+  - The cursor's rows come from the read-consistent snapshot taken at `OPEN`. With `SKIP LOCKED`, the row lock is taken
+    later, at each `FETCH`.
+  - Suppose another session changes a candidate row and commits between our `OPEN` and our `FETCH` of it. For example:
+    - a concurrent claimer claims it (status 1, a new lease in the future);
+    - or its previous owner acknowledges it after its lease expired (status 2).
+  - The row is then no longer locked, so our `FETCH` locks it. The block then updates it by `ROWID` without re-checking
+    `STATUS IN (0, 1) AND AVAILABLE_AT <= v_now`.
+  - Whether Oracle re-evaluates the predicate against the current row version (a write-consistency restart) at fetch time
+    under `SKIP LOCKED` is not something this code checks or a test pins.
+    - If Oracle does not, a message under a valid lease is claimed twice (concurrent duplicate delivery, and the first
+      owner's acknowledgement reports a lost lease).
+    - Or a Delivered row is moved back to Processing with `ATTEMPT_COUNT + 1` and delivered again.
+  - The reference providers both re-check:
+    - PostgreSQL through EvalPlanQual on `FOR UPDATE`;
+    - SQL Server explicitly (`WHERE m.[status] IN (0, 1) AND m.[available_at] <= @_now` in claim phase 2,
+      `SqlServerOutboxSql.cs:113`).
+- **Evidence:** Reasoned.
+  - `Concurrent_claimers_never_receive_the_same_message` passed in CI. However, its race window is microseconds per row,
+    and it never races a claim against an acknowledgement or a lease expiry, so it is weak evidence either way.
+  - I could not run Oracle to test this.
+- **Recommendation:**
+  - Make the UPDATE self-guarding and count only rows it changed:
+    `UPDATE ... WHERE ROWID = v_rid AND STATUS IN (0, 1) AND AVAILABLE_AT <= v_now;`
+    `IF SQL%ROWCOUNT = 1 THEN v_count := v_count + 1; v_bytes := v_bytes + v_size; v_ids := v_ids || RAWTOHEX(v_id); END IF;`
+  - The row is already locked, so the extra predicate costs nothing.
+  - Add a deterministic provider test:
+    1. Open the exact `ClaimCandidates` cursor in a test block.
+    2. Commit a change to the first candidate from a second connection (claim it, or mark it delivered).
+    3. Fetch, and assert that the row is not claimed again.
+- **Status:** Open
+
+#### OR-02 (Medium): the REF CURSOR is not disposed when nothing is claimed, which is the idle dispatcher's hot path
+
+- **File:** `src/DbRelay.Oracle/Internal/OracleOutboxStore.cs:166-178`
+- **Failure scenario:**
+  - The block always runs `OPEN :claimed FOR ...`, so every claim returns a server-side cursor.
+  - When `:claimed_ids` is NULL (nothing due), `ClaimAsync` returns at `:174` without disposing `cursor.Value`. The
+    `using (var refCursor = ...)` is reached only when rows were claimed. A `ParseIds` exception also skips it.
+  - An idle dispatcher polls continuously, so most claims take this path.
+  - Disposing the command and returning the connection to the pool does not necessarily close an output REF CURSOR on the
+    pooled session.
+  - If the cursor stays open until the `OracleRefCursor` is finalized, idle polling accumulates open cursors per pooled
+    session until ORA-01000 (`OPEN_CURSORS`, default 300). After that, every claim fails until the session is recycled.
+  - The test suite cannot show this. It does a few dozen empty claims per pooled session, and there is no Oracle dispatcher
+    integration test (OR-13).
+- **Evidence:** Reasoned. The missing dispose is certain. Whether it leaks depends on ODP.NET internals and was not
+  measured. Either way, CLAUDE.md requires disposing every reader-like resource.
+- **Recommendation:**
+  - Take the cursor into a `using` immediately after `ExecuteNonQueryAsync`, before parsing the ids or returning early:
+    `using var refCursor = cursor.Value as OracleRefCursor;`
+  - Add a provider test:
+    1. Run 1,000 empty claims through a pool of size 1 (`Max Pool Size=1`).
+    2. Assert that `V$OPEN_CURSOR` for that SID does not grow, or simply that no ORA-01000 occurs.
+- **Status:** Open
+
+#### OR-03 (Medium): LOB parameters are never disposed; possible temporary-LOB growth on pooled and caller sessions, and per-LOB round trips
+
+- **File:**
+  - `src/DbRelay.Oracle/Internal/OracleOutboxStore.cs:118-139` (insert: one `Blob` and one `Clob` parameter per row, up to 90 rows per statement);
+  - `:218, :227, :621-622` (`LAST_ERROR` as `Clob`);
+  - output parameters at `:166-167, :285-288, :515`
+- **Failure scenario:**
+  - When a `byte[]` is bound as `OracleDbType.Blob`, or a `string` as `OracleDbType.Clob`, ODP.NET may create a
+    session-duration temporary LOB on the server for each parameter.
+  - Neither `OracleParameter` (which implements `IDisposable`) nor its value is disposed here. Disposing `OracleCommand`
+    does not dispose its parameters.
+  - Temporary LOBs that are not freed live until the *session* ends:
+    - in the dispatcher's pooled sessions, that is effectively forever;
+    - on the transactional path, they are in the **caller's** session.
+  - Under sustained enqueue, `V$TEMPORARY_LOBS` and TEMP tablespace use grow on sessions DbRelay does not own.
+  - Separately, a 90-row `INSERT ALL` may cost up to 180 temporary-LOB round trips. That would undo much of the benefit
+    of batching.
+- **Evidence:** Reasoned, not measured. Whether ODP.NET 23.26 frees these LOBs on command dispose or sends small values
+  inline is exactly what needs measuring.
+- **Recommendation:**
+  - Dispose every parameter after execution, for example `finally { foreach (OracleParameter p in command.Parameters) p.Dispose(); }`
+    in one helper used by every command.
+  - Add a provider test: run 50 `EnqueueManyAsync(90)` calls on one caller connection, then assert that
+    `SELECT CACHE_LOBS + NOCACHE_LOBS FROM V$TEMPORARY_LOBS WHERE SID = SYS_CONTEXT('USERENV','SID')` has not grown.
+  - Measure insert round trips (or the time for 90 x 1 KB rows) against binding payloads under 32 KB as `Raw` and headers
+    under 32 KB as `Varchar2`, which Oracle converts on insert into a LOB column.
+- **Status:** Open
+
+#### OR-04 (Low): multi-statement insert without a transaction: DbRelay begins and commits on the caller's connection, and treats any `InvalidOperationException` as "a transaction exists"
+
+- **File:** `src/DbRelay.Oracle/Internal/OracleOutboxStore.cs:81-111` (`BeginTransaction()` at `:97`, `catch (InvalidOperationException)` at `:99-104`)
+- **Failure scenario:**
+  - With `transaction: null` and more than 90 records, DbRelay calls `BeginTransaction()` and `CommitAsync()` on the
+    caller-owned connection. This is the same pattern as SQL Server (CR-15, K9), and ADR 0005 now documents it.
+  - I found no path where this commits *caller* work:
+    - with no `OracleTransaction`, ODP.NET autocommits every command, so the session has no pending work;
+    - if the caller has a local or distributed transaction, `BeginTransaction` throws and the statements join it.
+  - Two residual risks remain:
+    1. The catch assumes that every `InvalidOperationException` from `BeginTransaction` means "a transaction is in
+       progress". If ODP.NET throws it for another reason, the chunks run as separately autocommitted statements. A failure
+       in chunk N then leaves chunks 1 to N-1 committed, silently breaking the all-or-nothing contract of `EnqueueManyAsync`.
+       For example, a connection enlisted in a `TransactionScope` that has already completed or aborted.
+    2. With a caller transaction, a failure in chunk N leaves earlier chunks in that transaction (Oracle rolls back only the
+       failed statement). A caller that catches the exception and commits anyway commits a partial batch, as in CR-15.
+- **Evidence:** Reasoned. The 200-row joined case is tested (`Null_transaction_while_a_transaction_is_in_progress_joins_it`).
+  The other `InvalidOperationException` sources are not.
+- **Recommendation:**
+  - Narrow the catch. After the catch, run one cheap check that a transaction really is active:
+    `SELECT DBMS_TRANSACTION.LOCAL_TRANSACTION_ID FROM DUAL` must be non-null, or check `OracleConnection` enlistment state.
+    If no transaction is active, rethrow.
+  - Alternatively, avoid multi-statement inserts on caller connections. Insert more than 90 rows in one PL/SQL `FORALL`
+    block over hex or array binds (the approach the batch acknowledgements already use for ids). The call is then atomic
+    without DbRelay ever beginning a transaction on a caller's connection, and that also closes residual risk 2.
+  - Document residual risk 2 on `EnqueueManyAsync`: roll back on any exception.
+- **Status:** Open
+
+#### OR-05 (Low): the schema script changes `DDL_LOCK_TIMEOUT` on pooled sessions and leaves it at 30 on failure; the 30 s wait equals the default command timeout
+
+- **File:**
+  - `src/DbRelay.Oracle/Scripts/001_create_outbox.sql:36, 86-87`
+  - `src/DbRelay.Oracle/Internal/OracleOutboxSchemaManager.cs:15, 30-48`
+  - `src/DbRelay.Oracle/OracleOutboxOptions.cs:19` (default `CommandTimeout` 30 s)
+- **Failure scenario:**
+  1. **Leak on failure.** The reset to 0 runs only on success. Any raised error, including the retried ORA-04020, ORA-04021
+     and ORA-00054, returns the session to the ODP.NET pool with `DDL_LOCK_TIMEOUT = 30`. With
+     `UseOracle(connectionString)`, the pool is shared with every application connection that uses the same string, so
+     later application DDL on that session silently waits up to 30 s instead of failing fast.
+  2. **Overwrite on success.** On success the reset writes 0, overwriting any value the DBA set, for example in a logon
+     trigger.
+  3. **Timeout race.** A DDL that waits the full 30 s for a lock races the 30 s command timeout. ODP.NET then raises
+     ORA-01013 (user requested cancel), which `IsConcurrentDdlError` does not retry. `EnsureCreatedAsync` therefore fails
+     in exactly the contention case the timeout was added for.
+- **Evidence:** Reasoned (script control flow).
+- **Recommendation:**
+  - Reset in an exception handler as well: `EXCEPTION WHEN OTHERS THEN EXECUTE IMMEDIATE 'ALTER SESSION SET DDL_LOCK_TIMEOUT = 0'; RAISE;`
+  - Better, avoid the session change entirely. Check `ALL_OBJECTS` or `ALL_INDEXES` for each object before issuing its
+    DDL, so that a running system never takes DDL locks at start-up.
+  - Use a `DDL_LOCK_TIMEOUT` clearly below `CommandTimeout` (for example 10 s), or derive it from the timeout.
+- **Status:** Open
+
+#### OR-06 (Low): `RAW(16)` accepts shorter values; a row with an ID that is not 16 bytes corrupts the claim result instead of becoming an unreadable placeholder
+
+- **File:**
+  - `src/DbRelay.Oracle/Scripts/001_create_outbox.sql:39`
+  - `src/DbRelay.Oracle/Internal/OracleOutboxSql.cs:112` (`RAWTOHEX(v_id)` appended without a length check)
+  - `src/DbRelay.Oracle/Internal/OracleOutboxStore.cs:584-594` (fixed 32-hex parse), `:535` (`new Guid(...)` inside the CR-01 fallback)
+- **Failure scenario:**
+  - Unlike `uuid` and `uniqueidentifier`, `RAW(16)` stores 1 to 16 bytes. A hand-written or migrated row with an 8-byte ID
+    breaks the claim in two ways.
+    1. It contributes 16 hex digits to `:claimed_ids`, so `ParseIds` misreads every later ID in that batch. Those rows are
+       claimed (attempts already counted) but silently dropped from the result. They stay Processing until the lease
+       expires, which can repeat.
+    2. In `ReadDetails`, `new Guid(byte[8])` throws inside the catch block, so the whole claim fails. Its batch-mates are
+       claimed but never delivered, and the poison row can never be dead-lettered because the dispatcher never sees it.
+  - This defeats the CR-01/FU-01 protection that the other providers have.
+- **Evidence:** Reasoned.
+- **Recommendation:**
+  - Add `CONSTRAINT CK_<table>_ID CHECK (LENGTHB(ID) = 16)` to the table (new installs; note it in the upgrade docs).
+  - Make the parse defensive:
+    - In the block, claim only rows with `UTL_RAW.LENGTH(ID) = 16`, or emit a separator.
+    - In `ReadDetails`, build the placeholder ID with a non-throwing conversion.
+  - Add a compile-time or unit check that `OracleOutboxSql.HexPerId * OutboxLimits.MaxClaimBatchSize <= 32767`. Raising
+    the batch limit would otherwise turn every claim into ORA-06502.
+- **Status:** Open
+
+#### OR-07 (Low): a shared conformance assertion was relaxed for every provider
+
+- **File:** `tests/DbRelay.Storage.Conformance/OutboxStoreConformanceTests.cs:153`
+- **Failure scenario:**
+  - `Schema_create_script_uses_configured_schema` now compares with `OrdinalIgnoreCase` for PostgreSQL and SQL Server as
+    well.
+  - A regression that case-folds the schema name in their scripts would no longer be caught. On PostgreSQL that matters:
+    quoted identifiers are case-sensitive.
+  - CLAUDE.md: "Never weaken a test to make it pass."
+- **Evidence:** Verified (diff).
+- **Recommendation:**
+  - Add a `protected virtual string ExpectedSchemaInScript(string schema) => schema;` hook. Oracle overrides it with
+    `schema.ToUpperInvariant()`.
+  - Keep `StringComparison.Ordinal`.
+- **Status:** Open
+
+#### OR-08 (Low): non-AL32UTF8 databases silently corrupt non-ASCII text columns
+
+- **File:** `src/DbRelay.Oracle/Scripts/001_create_outbox.sql:40-57` (`VARCHAR2(n CHAR)` and `CLOB` for `MESSAGE_TYPE`, `DESTINATION`, `HEADERS`, `CORRELATION_ID`, `CAUSATION_ID`, `LOCKED_BY` and `LAST_ERROR`)
+- **Failure scenario:**
+  - Legacy Oracle databases often use a single-byte character set such as `WE8MSWIN1252`. There, characters outside that
+    set are replaced with `?` on insert, without any error.
+  - A message type or header value containing such characters reads back changed. For example, routing by `MessageType`
+    or a non-Latin correlation ID silently stops matching.
+  - Payloads are a `BLOB` and are safe.
+- **Evidence:** Reasoned (Oracle character-set conversion behaviour). AL32UTF8 is the default since 12.2, so most new
+  databases are unaffected.
+- **Recommendation:**
+  - Document that the database character set must be AL32UTF8, or use `NVARCHAR2` and `NCLOB`.
+  - Optionally, have `EnsureCreatedAsync` read `NLS_DATABASE_PARAMETERS` and fail or warn if the character set is not a
+    Unicode set.
+- **Status:** Open
+
+#### OR-09 (Low): cancellation may surface as `OracleException` ORA-01013 rather than `OperationCanceledException`
+
+- **File:**
+  - `src/DbRelay.Oracle/Internal/OracleConnectionSource.cs:75-96`, and every `Execute*Async(ct)` call in `OracleOutboxStore.cs`;
+  - consumer at `src/DbRelay/Dispatching/OutboxDispatcher.cs:213-224`
+- **Failure scenario:**
+  - When the host stops during a claim or an acknowledgement, ODP.NET may cancel the server call and throw
+    `OracleException` (ORA-01013 "user requested cancel of current operation") instead of `OperationCanceledException`.
+  - The dispatcher's `catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)` then does not match.
+    Normal shutdowns log `ClaimFailed` errors and count poll failures.
+- **Evidence:** Unverified. I could not run ODP.NET against a server. No test cancels an in-flight Oracle command.
+- **Recommendation:**
+  - In `OracleConnectionSource.ExecuteAsync`, translate `OracleException { Number: 1013 }` to
+    `OperationCanceledException(cancellationToken)` when `cancellationToken.IsCancellationRequested`.
+  - Add a provider test that cancels a long statement, for example a block running `DBMS_SESSION.SLEEP(5)`.
+- **Status:** Open
+
+#### OR-10 (Info): documentation drift in ADR 0005 and the XML docs
+
+- **File:**
+  - `docs/decisions/0005-oracle-and-mysql-providers.md:56, 81`
+  - `src/DbRelay.Oracle/Internal/OracleOutboxSql.cs:213, 345`
+  - `src/DbRelay.Oracle/Internal/OracleConnectionSource.cs:71-73`
+- **Failure scenario:** The documents disagree with the code:
+  - The ADR's column table says `TIMESTAMP(3)`; the script and `docs/oracle.md` say `TIMESTAMP(6)`.
+  - The ADR's claim says `ORDER BY <claim expression>, ID`, but the cursor orders by the claim expression only. Rows with
+    equal `AVAILABLE_AT`, for example a whole `INSERT ALL` batch with the same database `now`, are claimed in an
+    unspecified order. That is harmless for correctness, but not what the ADR states.
+  - The `CreateBlock` XML doc says comments are removed. Only the header comments are; the `--` comments inside the block
+    remain (harmless).
+  - The `ExecuteAsync` comment says every operation is a single autocommitted statement. The >90-row standalone insert is
+    a multi-statement transaction. The retry is still safe (see "found sound").
+- **Recommendation:**
+  - Correct the ADR to `TIMESTAMP(6)`, and either add `ID` as the tie-breaker (an index-ordered scan would need it as a key
+    column) or drop it from the ADR.
+  - Fix the two comments.
+- **Status:** Open
+
+#### OR-11 (Info): REF CURSOR inheritance of `InitialLOBFetchSize = -1` is assumed, not tested
+
+- **File:** `src/DbRelay.Oracle/Internal/OracleConnectionSource.cs:65`; `src/DbRelay.Oracle/Internal/OracleOutboxStore.cs:180`
+- **Failure scenario:**
+  - The claim's rows are read through `OracleRefCursor.GetDataReader()`.
+  - If that reader does not inherit the command's `InitialLOBFetchSize = -1`, results stay correct: `GetValue` still returns
+    the full `byte[]`. However, every claimed row costs up to three extra round trips (payload, headers, last error) on the
+    hottest read path. This would show only as throughput.
+- **Evidence:** Unverified (ODP.NET behaviour).
+- **Recommendation:** In a provider test, assert `reader.InitialLOBFetchSize == -1` on the REF CURSOR's reader (the property
+  is readable). If it is not inherited, set `refCursor.FetchSize` and read the LOBs through `GetOracleBlob` in bulk, or
+  return the payload inline.
+- **Status:** Open
+
+#### OR-12 (Info): the claim index has no ID tie-breaker, so the claim relies on an index-ordered scan for `ORDER BY`
+
+- **File:** `src/DbRelay.Oracle/Scripts/001_create_outbox.sql:63`; `src/DbRelay.Oracle/Internal/OracleOutboxSql.cs:343-345`
+- **Failure scenario:**
+  - The no-sort plan holds only while the hint is honoured. If the index is dropped, invisible or unusable, the claim falls
+    back to a full scan plus `SORT ORDER BY` of every due row on each poll.
+  - The documentation already says "keep the indexes". The plan test pins the hinted plan only on a fresh 20,000-row table,
+    not after `ALTER INDEX ... UNUSABLE` or with stale statistics.
+- **Recommendation:** None required. Optionally, have the health check report the claim index's status from
+  `ALL_INDEXES.STATUS`, so that an unusable index is visible.
+- **Status:** Open
+
+#### OR-13 (Info): test gaps specific to Oracle
+
+- **File:** `tests/DbRelay.Oracle.Tests/*`
+- **Gaps:**
+  - No test inserts large LOBs through `INSERT ALL`, such as payloads over 32 KB, headers over 4,000 bytes, or a
+    2,000-character multibyte `LAST_ERROR` (6,000 bytes in AL32UTF8). These are the cases where ODP.NET LOB binding and
+    ORA-24816 or ORA-01461 surprises occur. The ADR's original "array binding of BLOB values" item has no direct equivalent.
+  - No Oracle counterpart of SQL Server's BA-07 stress test (claims, stale batch acknowledgements and cleanup at once).
+    `DeadlockRetries` is exposed but never asserted for Oracle.
+  - No dispatcher end-to-end (integration) test on Oracle. Such a test would have exercised the idle-poll path of OR-02 at
+    volume.
+  - No test for OR-01's open-to-fetch race, for OR-09's cancellation, or for the failure path of OR-05.
+- **Recommendation:**
+  - Add the large-LOB `EnqueueMany(90)` and `EnqueueMany(1000)` round-trip test.
+  - Port the BA-07 stress test.
+  - Run the integration suite against Oracle in the 23ai job.
+- **Status:** Open
+
+### Commands run in this review
+
+| Command | Purpose | Result |
+|---|---|---|
+| `git diff --stat main...oracle-provider`, `git show --stat 525d83c` | Scope, and the documentation commit that landed during the review | 20 files in code and tests; 525d83c is documentation only |
+| `dotnet build tests/DbRelay.Oracle.Tests/DbRelay.Oracle.Tests.csproj -c Release` | Build the provider and tests on all target frameworks | Succeeded, 0 warnings, 0 errors |
+| `dotnet test --project tests/DbRelay.Oracle.Tests -c Release -f net10.0 --no-build` (no `DBRELAY_TEST_ORACLE`) | Non-database tests | 27 passed, 55 skipped, 0 failed |
+
+Oracle database tests: **not run here (skipped: no Oracle available)**.
+
+### Verdict
+
+**No Critical or High findings. Three open Medium findings:**
+- OR-01: the claim UPDATE has no re-check;
+- OR-02: the REF CURSOR leaks on empty claims;
+- OR-03: LOB parameters are not disposed.
+
+Each has a small, local fix. OR-02 and OR-03 should be fixed before the package is released. OR-01 should be fixed, or
+disproved by the deterministic test it describes, before release.
+
+## Oracle provider review: resolution log (principal architect, 2026-11-27)
+
+| ID | Severity | Resolution |
+|---|---|---|
+| OR-01 | Medium | **Fixed.** The claim's UPDATE re-checks `STATUS IN (0, 1) AND AVAILABLE_AT <= v_now` on the locked row, and only rows with `SQL%ROWCOUNT = 1` are counted, returned and budgeted. The deterministic open-to-fetch gap test the review describes is not written yet: two sessions would have to interleave inside one PL/SQL block. The conformance concurrency test (8 claimers, no message claimed twice) still covers the outcome. |
+| OR-02 | Medium | **Fixed.** The REF CURSOR is disposed right after execute, on every path including an empty claim. |
+| OR-03 | Medium | **Fixed.** Command parameters, including BLOB and NCLOB values, are disposed after the insert, the claim and every guarded or bulk statement. The `V$TEMPORARY_LOBS` test is not written. |
+| OR-04 | Low | **Accepted, documented** (as CR-15/K9 on SQL Server). The `InvalidOperationException` from `BeginTransaction` is the documented signal that the connection already has a transaction. |
+| OR-05 | Low | **Fixed.** The script no longer changes session settings (`DDL_LOCK_TIMEOUT` removed). The ORA-00054/04020/04021 retry covers concurrent DDL. |
+| OR-06 | Low | **Fixed.** Check constraint `CK_<table>_ID` (`LENGTH(RAWTOHEX(ID)) = 32`). Unit test: the claim order of a full batch fits `VARCHAR2(32767)`. Database test: a short ID is rejected with ORA-02290. |
+| OR-07 | Low | **Fixed.** The shared assertion is ordinal again; Oracle overrides the new `SchemaNameInScript` hook. |
+| OR-08 | Low | **Fixed.** Text columns are `NVARCHAR2` and `NCLOB` and parameters bind as `NVarchar2` and `NClob`, which are Unicode whatever the database character set. A test pins the column types. |
+| OR-09 | Low | **Fixed.** An `OracleException` raised while the caller's token is cancelled is rethrown as `OperationCanceledException`, on DbRelay's connections and on the caller's insert path. Not covered by a test. |
+| OR-10 | Info | **Fixed.** The ADR says `TIMESTAMP(6)` and no ID tie-break; both XML comments are corrected. |
+| OR-11 to OR-13 | Info | **Open.** The REF CURSOR's LOB fetch size, the index status in the health check, and the extra tests (large LOBs, a BA-07-style deadlock stress test, dispatcher end to end) go to the Oracle release checklist. |

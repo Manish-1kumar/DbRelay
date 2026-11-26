@@ -57,7 +57,20 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
 
         // Exactly the caller's connection; DbRelay never opens, closes, commits, rolls back or disposes it. ODP.NET runs every
         // command on a connection in that connection's transaction, if it has one, so the rows commit or roll back with it.
-        return InsertCoreAsync((OracleConnection)connection, transaction is not null, records, cancellationToken);
+        return InsertOnCallerConnectionAsync((OracleConnection)connection, transaction is not null, records, cancellationToken);
+    }
+
+    private async Task InsertOnCallerConnectionAsync(
+        OracleConnection connection, bool hasTransaction, IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await InsertCoreAsync(connection, hasTransaction, records, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OracleException ex) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("The outbox insert was cancelled.", ex, cancellationToken); // OR-09
+        }
     }
 
     public Task InsertStandaloneAsync(IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
@@ -118,26 +131,38 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
             var command = _connections.CreateCommand(connection, _sql.GetInsert(count));
             await using (command.ConfigureAwait(false))
             {
-                for (var i = 0; i < count; i++)
+                try
                 {
-                    var record = records[start + i];
-                    var suffix = i.ToString(CultureInfo.InvariantCulture);
-                    var parameters = command.Parameters;
-                    parameters.Add(Raw("id" + suffix, record.Id));
-                    parameters.Add(Text("mt" + suffix, record.MessageType));
-                    parameters.Add(Text("de" + suffix, record.Destination));
-                    parameters.Add(new OracleParameter("pl" + suffix, OracleDbType.Blob) { Value = ToArray(record.Payload) });
-                    parameters.Add(Text("ct" + suffix, record.ContentType));
-                    parameters.Add(Clob("hd" + suffix, record.HeadersJson));
-                    parameters.Add(Text("co" + suffix, record.CorrelationId));
-                    parameters.Add(Text("ca" + suffix, record.CausationId));
-                    parameters.Add(Timestamp("da" + suffix, record.DeliverAt?.UtcDateTime));
-                    parameters.Add(Number("dl" + suffix, record.Delay is { } delay ? ToMilliseconds(delay) : null));
+                    await ExecuteInsertAsync(command, records, start, count, cancellationToken).ConfigureAwait(false);
                 }
-
-                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                finally
+                {
+                    OracleConnectionSource.DisposeParameters(command);
+                }
             }
         }
+    }
+
+    private static async Task ExecuteInsertAsync(OracleCommand command, IReadOnlyList<OutboxRecord> records, int start, int count, CancellationToken cancellationToken)
+    {
+        var parameters = command.Parameters;
+        for (var i = 0; i < count; i++)
+        {
+            var record = records[start + i];
+            var suffix = i.ToString(CultureInfo.InvariantCulture);
+            parameters.Add(Raw("id" + suffix, record.Id));
+            parameters.Add(Text("mt" + suffix, record.MessageType));
+            parameters.Add(Text("de" + suffix, record.Destination));
+            parameters.Add(new OracleParameter("pl" + suffix, OracleDbType.Blob) { Value = ToArray(record.Payload) });
+            parameters.Add(Text("ct" + suffix, record.ContentType));
+            parameters.Add(Clob("hd" + suffix, record.HeadersJson));
+            parameters.Add(Text("co" + suffix, record.CorrelationId));
+            parameters.Add(Text("ca" + suffix, record.CausationId));
+            parameters.Add(Timestamp("da" + suffix, record.DeliverAt?.UtcDateTime));
+            parameters.Add(Number("dl" + suffix, record.Delay is { } delay ? ToMilliseconds(delay) : null));
+        }
+
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     // ---- Claim and transitions -------------------------------------------------------------------------------------
@@ -157,51 +182,62 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
                 var command = _connections.CreateCommand(connection, _sql.Claim);
                 await using (command.ConfigureAwait(false))
                 {
-                    var parameters = command.Parameters;
-                    parameters.Add(Number("lease_ms", ToMilliseconds(request.LeaseDuration)));
-                    parameters.Add(Number("max_payload_bytes", request.MaxPayloadBytes));
-                    parameters.Add(Raw("lock_token", request.LockToken));
-                    parameters.Add(Text("worker_id", Truncate(request.WorkerId, OutboxLimits.MaxWorkerIdLength)));
-                    parameters.Add(Number("batch_size", request.BatchSize));
-                    var ids = parameters.Add(new OracleParameter("claimed_ids", OracleDbType.Varchar2, 32767) { Direction = ParameterDirection.Output });
-                    var cursor = parameters.Add(new OracleParameter("claimed", OracleDbType.RefCursor) { Direction = ParameterDirection.Output });
-
-                    await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-
-                    var order = ParseIds(ids.Value);
-                    if (order.Count == 0)
+                    try
                     {
-                        return [];
+                        return await ExecuteClaimAsync(command, request, ct).ConfigureAwait(false);
                     }
-
-                    var rows = new Dictionary<Guid, OutboxMessageDetails>(order.Count);
-                    using (var refCursor = (OracleRefCursor)cursor.Value)
+                    finally
                     {
-                        var reader = refCursor.GetDataReader();
-                        await using (reader.ConfigureAwait(false))
-                        {
-                            while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                            {
-                                var details = ReadDetails(reader);
-                                rows[details.Id] = details;
-                            }
-                        }
+                        OracleConnectionSource.DisposeParameters(command);
                     }
-
-                    // The cursor's row order is unspecified; return the claim order (oldest AVAILABLE_AT first).
-                    var result = new List<OutboxMessageDetails>(order.Count);
-                    foreach (var id in order)
-                    {
-                        if (rows.TryGetValue(id, out var details))
-                        {
-                            result.Add(details);
-                        }
-                    }
-
-                    return result;
                 }
             },
             cancellationToken);
+    }
+
+    private static async Task<IReadOnlyList<OutboxMessageDetails>> ExecuteClaimAsync(OracleCommand command, ClaimRequest request, CancellationToken ct)
+    {
+        var parameters = command.Parameters;
+        parameters.Add(Number("lease_ms", ToMilliseconds(request.LeaseDuration)));
+        parameters.Add(Number("max_payload_bytes", request.MaxPayloadBytes));
+        parameters.Add(Raw("lock_token", request.LockToken));
+        parameters.Add(Text("worker_id", Truncate(request.WorkerId, OutboxLimits.MaxWorkerIdLength)));
+        parameters.Add(Number("batch_size", request.BatchSize));
+        var ids = parameters.Add(new OracleParameter("claimed_ids", OracleDbType.Varchar2, 32767) { Direction = ParameterDirection.Output });
+        var cursor = parameters.Add(new OracleParameter("claimed", OracleDbType.RefCursor) { Direction = ParameterDirection.Output });
+
+        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+        // OR-02: the cursor is open on the server even when nothing was claimed, so it is disposed on every path.
+        using var refCursor = cursor.Value as OracleRefCursor;
+        var order = ParseIds(ids.Value);
+        if (order.Count == 0 || refCursor is null)
+        {
+            return [];
+        }
+
+        var rows = new Dictionary<Guid, OutboxMessageDetails>(order.Count);
+        var reader = refCursor.GetDataReader();
+        await using (reader.ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                var details = ReadDetails(reader);
+                rows[details.Id] = details;
+            }
+        }
+
+        // The cursor's row order is unspecified; return the claim order (oldest AVAILABLE_AT first).
+        var result = new List<OutboxMessageDetails>(order.Count);
+        foreach (var id in order)
+        {
+            if (rows.TryGetValue(id, out var details))
+            {
+                result.Add(details);
+            }
+        }
+
+        return result;
     }
 
     public Task<bool> MarkDeliveredAsync(Guid messageId, Guid lockToken, CancellationToken cancellationToken) =>
@@ -497,8 +533,15 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
                 var command = _connections.CreateCommand(connection, sql);
                 await using (command.ConfigureAwait(false))
                 {
-                    addParameters(command.Parameters);
-                    return await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    try
+                    {
+                        addParameters(command.Parameters);
+                        return await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        OracleConnectionSource.DisposeParameters(command);
+                    }
                 }
             },
             cancellationToken);
@@ -511,10 +554,17 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
                 var command = _connections.CreateCommand(connection, sql);
                 await using (command.ConfigureAwait(false))
                 {
-                    addParameters(command.Parameters);
-                    var affected = command.Parameters.Add(new OracleParameter("affected", OracleDbType.Int32) { Direction = ParameterDirection.Output });
-                    await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-                    return affected.Value is OracleDecimal { IsNull: false } value ? value.ToInt32() : 0;
+                    try
+                    {
+                        addParameters(command.Parameters);
+                        var affected = command.Parameters.Add(new OracleParameter("affected", OracleDbType.Int32) { Direction = ParameterDirection.Output });
+                        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                        return affected.Value is OracleDecimal { IsNull: false } value ? value.ToInt32() : 0;
+                    }
+                    finally
+                    {
+                        OracleConnectionSource.DisposeParameters(command);
+                    }
                 }
             },
             cancellationToken);
@@ -616,10 +666,10 @@ internal sealed class OracleOutboxStore : IOutboxStore, IOutboxBatchStore
         new(name, OracleDbType.Raw, 16) { Value = value.ToByteArray() };
 
     private static OracleParameter Text(string name, string? value) =>
-        new(name, OracleDbType.Varchar2) { Value = (object?)value ?? DBNull.Value };
+        new(name, OracleDbType.NVarchar2) { Value = (object?)value ?? DBNull.Value };
 
     private static OracleParameter Clob(string name, string? value) =>
-        new(name, OracleDbType.Clob) { Value = (object?)value ?? DBNull.Value };
+        new(name, OracleDbType.NClob) { Value = (object?)value ?? DBNull.Value };
 
     private static OracleParameter Number(string name, long? value) =>
         new(name, OracleDbType.Int64) { Value = value is { } v ? v : DBNull.Value };

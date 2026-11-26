@@ -68,9 +68,22 @@ internal sealed class OracleConnectionSource
     }
 
     /// <summary>
-    /// Runs <paramref name="operation"/> on a new provider-owned connection. ORA-00060 is retried a few times: every operation passed
-    /// here is a single autocommitted statement or PL/SQL block, which Oracle has rolled back as a whole when the error reaches the
-    /// client, so running it again is safe.
+    /// Disposes a command's parameters (OR-03). ODP.NET creates temporary LOBs for BLOB and CLOB values and does not free them when
+    /// the command is disposed; on a pooled session they would otherwise stay allocated.
+    /// </summary>
+    public static void DisposeParameters(OracleCommand command)
+    {
+        foreach (OracleParameter parameter in command.Parameters)
+        {
+            parameter.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Runs <paramref name="operation"/> on a new provider-owned connection. ORA-00060 is retried a few times. Every operation passed
+    /// here is either one autocommitted statement or PL/SQL block, which Oracle has rolled back as a whole when the error reaches the
+    /// client, or a multi-statement insert in a transaction DbRelay began on this connection, which is rolled back when the error
+    /// leaves it uncommitted. Running either again is safe.
     /// </summary>
     public async Task<T> ExecuteAsync<T>(Func<OracleConnection, CancellationToken, Task<T>> operation, CancellationToken cancellationToken)
     {
@@ -86,6 +99,12 @@ internal sealed class OracleConnectionSource
                 catch (OracleException ex) when (ex.Number == DeadlockErrorNumber && attempt < MaxDeadlockAttempts)
                 {
                     Interlocked.Increment(ref _deadlockRetries);
+                }
+                catch (OracleException ex) when (cancellationToken.IsCancellationRequested)
+                {
+                    // OR-09: ODP.NET reports a cancelled call as ORA-01013 ("user requested cancel"). Callers such as the dispatcher
+                    // treat only OperationCanceledException as a normal shutdown.
+                    throw new OperationCanceledException("The Oracle operation was cancelled.", ex, cancellationToken);
                 }
             }
 

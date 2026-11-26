@@ -70,6 +70,9 @@ public abstract class OutboxStoreConformanceTests : IAsyncLifetime
     /// </summary>
     protected virtual Task PrepareSchemaAsync(string schema) => Task.CompletedTask;
 
+    /// <summary>The configured schema name as the provider writes it in its create script (Oracle: upper case).</summary>
+    protected virtual string SchemaNameInScript(string schema) => schema;
+
     // ---- Lifecycle ---------------------------------------------------------------------------------------------------
 
     public async ValueTask InitializeAsync()
@@ -150,7 +153,7 @@ public abstract class OutboxStoreConformanceTests : IAsyncLifetime
     {
         RequireDatabase();
         var script = SchemaManager.GetCreateScript();
-        Assert.Contains(Schema, script, StringComparison.OrdinalIgnoreCase); // Oracle stores names in upper case
+        Assert.Contains(SchemaNameInScript(Schema), script, StringComparison.Ordinal);
         Assert.DoesNotContain("DROP ", script, StringComparison.OrdinalIgnoreCase);
     }
 

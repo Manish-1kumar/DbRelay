@@ -105,7 +105,7 @@ public sealed class OracleProviderTests(OracleFixture fixture)
     public void Long_table_names_get_distinct_names_within_the_identifier_limit()
     {
         var sql = new OracleOutboxSql("s", "t" + new string('x', 62));
-        string[] names = [sql.PrimaryKeyName, sql.StatusConstraintName, sql.ClaimIndexName, sql.CleanupIndexName, sql.DeadIndexName];
+        string[] names = [sql.PrimaryKeyName, sql.StatusConstraintName, sql.IdConstraintName, sql.ClaimIndexName, sql.CleanupIndexName, sql.DeadIndexName];
         Assert.All(names, n => Assert.InRange(n.Length, 1, 128));
         Assert.Equal(names.Length, names.Distinct(StringComparer.Ordinal).Count());
     }
@@ -135,6 +135,53 @@ public sealed class OracleProviderTests(OracleFixture fixture)
         Assert.StartsWith("INSERT ALL", largest, StringComparison.Ordinal);
         Assert.True(OracleOutboxSql.MaxInsertRowsPerStatement * 10 <= 999, "Oracle allows at most 999 columns across INSERT ALL clauses.");
         Assert.Throws<ArgumentOutOfRangeException>(() => sql.GetInsert(OracleOutboxSql.MaxInsertRowsPerStatement + 1));
+    }
+
+    [Fact]
+    public void The_claim_order_of_a_full_batch_fits_the_PLSQL_output_string()
+    {
+        // The claim returns 32 hex digits per claimed ID in one VARCHAR2(32767) output parameter.
+        Assert.True(OracleOutboxSql.HexPerId * OutboxLimits.MaxClaimBatchSize <= 32767);
+    }
+
+    // ---- Stored data ------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Text_columns_are_Unicode_and_IDs_must_be_16_bytes()
+    {
+        RequireDatabase();
+        var schema = NewSchemaName();
+        await CreateSchemaAsync(fixture, schema);
+        await using var sp = BuildFor(schema);
+        try
+        {
+            await sp.GetRequiredService<IOutboxSchemaManager>().EnsureCreatedAsync(Ct);
+            await using var connection = await fixture.OpenAsync();
+
+            // OR-08: NVARCHAR2 and NCLOB are Unicode whatever the database character set.
+            var types = (await connection.QueryAsync<(string Column, string Type)>(
+                "SELECT COLUMN_NAME, DATA_TYPE FROM ALL_TAB_COLUMNS WHERE OWNER = :Owner AND TABLE_NAME = 'OUTBOX_MESSAGES'",
+                new { Owner = schema.ToUpperInvariant() })).ToDictionary(c => c.Column, c => c.Type);
+            foreach (var column in new[] { "MESSAGE_TYPE", "DESTINATION", "CONTENT_TYPE", "CORRELATION_ID", "CAUSATION_ID", "LOCKED_BY" })
+            {
+                Assert.Equal("NVARCHAR2", types[column]);
+            }
+
+            Assert.Equal("NCLOB", types["HEADERS"]);
+            Assert.Equal("NCLOB", types["LAST_ERROR"]);
+
+            // OR-06: a shorter ID written by someone else would shift the claim order string; the table rejects it.
+            var ex = await Assert.ThrowsAnyAsync<DbException>(() => connection.ExecuteAsync(
+                $"""
+                INSERT INTO {Quote(schema)}."OUTBOX_MESSAGES" (ID, MESSAGE_TYPE, PAYLOAD, CONTENT_TYPE, SCHEDULED_AT, AVAILABLE_AT)
+                VALUES (HEXTORAW('0102030405060708'), 'short.id', EMPTY_BLOB(), 'application/json', SYSTIMESTAMP, SYSTIMESTAMP)
+                """));
+            Assert.Contains("ORA-02290", ex.Message, StringComparison.Ordinal); // check constraint violated
+        }
+        finally
+        {
+            await DropSchemaAsync(fixture, schema);
+        }
     }
 
     // ---- Schema creation ----------------------------------------------------------------------------------------------

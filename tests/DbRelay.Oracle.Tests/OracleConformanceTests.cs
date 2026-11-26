@@ -17,6 +17,8 @@ public sealed class OracleConformanceTests(OracleFixture fixture) : OutboxStoreC
 
     protected override Task PrepareSchemaAsync(string schema) => CreateSchemaAsync(fixture, schema);
 
+    protected override string SchemaNameInScript(string schema) => schema.ToUpperInvariant();
+
     protected override string CreateOrdersTableSql(string schema) =>
         $"CREATE TABLE {Quote(schema)}.ORDERS (ID RAW(16) PRIMARY KEY, NOTE VARCHAR2(200 CHAR) NOT NULL)";
 

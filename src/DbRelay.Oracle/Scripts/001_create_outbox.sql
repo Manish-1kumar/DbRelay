@@ -2,7 +2,8 @@
 --
 -- Idempotent and non-destructive: each object is created in its own EXECUTE IMMEDIATE, and "already exists" errors
 -- (ORA-00955, ORA-01408, ORA-02260, ORA-02261, ORA-02264) are ignored. Existing objects are never altered or removed, so the
--- script is safe to run repeatedly, including by several instances at once.
+-- script is safe to run repeatedly, including by several instances at once. Text columns are NVARCHAR2 and NCLOB, which are
+-- Unicode whatever the database character set.
 --
 -- The schema (user) must already exist: DbRelay never creates users. Run as that user, or as a user that may create tables
 -- and indexes in it. Oracle commits DDL implicitly.
@@ -14,6 +15,7 @@
 --   {{version_table}}  quoted, optionally schema-qualified version table  (default "DBRELAY_SCHEMA_VERSION")
 --   {{pk}}             primary key constraint name                        (default PK_OUTBOX_MESSAGES)
 --   {{ck_status}}      status check constraint name                       (default CK_OUTBOX_MESSAGES_STATUS)
+--   {{ck_id}}          ID length check constraint name                    (default CK_OUTBOX_MESSAGES_ID)
 --   {{ix_claim}}       quoted, optionally schema-qualified claim index    (default "IX_OUTBOX_MESSAGES_CLAIM")
 --   {{ix_cleanup}}     quoted, optionally schema-qualified cleanup index  (default "IX_OUTBOX_MESSAGES_CLEANUP")
 --   {{ix_dead}}        quoted, optionally schema-qualified dead index     (default "IX_OUTBOX_MESSAGES_DEAD")
@@ -32,31 +34,31 @@ DECLARE
             END IF;
     END;
 BEGIN
-    -- Wait for a concurrent instance's DDL instead of failing with ORA-00054.
-    EXECUTE IMMEDIATE 'ALTER SESSION SET DDL_LOCK_TIMEOUT = 30';
-
+    -- No session settings are changed: the session may be pooled and shared with the application. EnsureCreatedAsync retries
+    -- the whole script when a concurrent instance's DDL holds a lock (ORA-00054, ORA-04020, ORA-04021).
     run('CREATE TABLE {{table}} (
         ID               RAW(16)            NOT NULL,
-        MESSAGE_TYPE     VARCHAR2(256 CHAR) NOT NULL,
-        DESTINATION      VARCHAR2(512 CHAR) NULL,
+        MESSAGE_TYPE     NVARCHAR2(256)     NOT NULL,
+        DESTINATION      NVARCHAR2(512)     NULL,
         PAYLOAD          BLOB               NOT NULL,
-        CONTENT_TYPE     VARCHAR2(128 CHAR) NOT NULL,
-        HEADERS          CLOB               NULL,
-        CORRELATION_ID   VARCHAR2(128 CHAR) NULL,
-        CAUSATION_ID     VARCHAR2(128 CHAR) NULL,
+        CONTENT_TYPE     NVARCHAR2(128)     NOT NULL,
+        HEADERS          NCLOB              NULL,
+        CORRELATION_ID   NVARCHAR2(128)     NULL,
+        CAUSATION_ID     NVARCHAR2(128)     NULL,
         STATUS           NUMBER(1)          DEFAULT 0 NOT NULL,
         ATTEMPT_COUNT    NUMBER(10)         DEFAULT 0 NOT NULL,
         CREATED_AT       TIMESTAMP(6)       DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP) NOT NULL,
         SCHEDULED_AT     TIMESTAMP(6)       NOT NULL,
         AVAILABLE_AT     TIMESTAMP(6)       NOT NULL,
         LOCK_TOKEN       RAW(16)            NULL,
-        LOCKED_BY        VARCHAR2(256 CHAR) NULL,
+        LOCKED_BY        NVARCHAR2(256)     NULL,
         LAST_ATTEMPT_AT  TIMESTAMP(6)       NULL,
         DELIVERED_AT     TIMESTAMP(6)       NULL,
         DEAD_LETTERED_AT TIMESTAMP(6)       NULL,
-        LAST_ERROR       CLOB               NULL,
+        LAST_ERROR       NCLOB              NULL,
         CONSTRAINT "{{pk}}" PRIMARY KEY (ID),
-        CONSTRAINT "{{ck_status}}" CHECK (STATUS BETWEEN 0 AND 3)
+        CONSTRAINT "{{ck_status}}" CHECK (STATUS BETWEEN 0 AND 3),
+        CONSTRAINT "{{ck_id}}" CHECK (LENGTH(RAWTOHEX(ID)) = 32)
     )');
 
     -- Claiming: due pending and leased rows, oldest AVAILABLE_AT first. The second key column splits the statistics count.
@@ -84,6 +86,5 @@ BEGIN
     END;
 
     COMMIT;
-    EXECUTE IMMEDIATE 'ALTER SESSION SET DDL_LOCK_TIMEOUT = 0';
 END;
 /
