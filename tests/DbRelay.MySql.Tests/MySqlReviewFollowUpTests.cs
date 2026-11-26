@@ -355,12 +355,23 @@ public sealed class MySqlReviewFollowUpTests(MySqlFixture fixture)
         try
         {
             var sql = new MySqlOutboxSql(schema, "outbox_messages");
+            var store = services.GetRequiredService<IOutboxStore>();
+            var records = Enumerable.Range(0, 50).Select(_ => Record()).ToList();
+            await store.InsertStandaloneAsync(records, Ct);
+            var token = Guid.NewGuid();
+            var leased = (await store.ClaimAsync(Claim(batch: 1, token: token), Ct))[0];
             await using var connection = await fixture.OpenAsync();
-            var hex = "'" + Hex(Guid.NewGuid()) + "'";
+            await connection.ExecuteAsync($"ANALYZE TABLE {sql.Table}");
+
+            // A real, leased row: on a row that does not exist, MySQL reports "Impossible WHERE noticed after reading const tables"
+            // instead of the key, although it did read the primary key to find that out.
+            var id = "'" + Hex(leased.Id) + "'";
+            var lockToken = "'" + Hex(token) + "'";
+            var other = "'" + Hex(records.First(r => r.Id != leased.Id).Id) + "'";
             string Bind(string statement) => statement
-                .Replace("@id", hex, StringComparison.Ordinal).Replace("@lock_token", hex, StringComparison.Ordinal)
-                .Replace("@i0", hex, StringComparison.Ordinal).Replace("@i1", hex, StringComparison.Ordinal)
-                .Replace("@t0", hex, StringComparison.Ordinal).Replace("@t1", hex, StringComparison.Ordinal)
+                .Replace("@id", id, StringComparison.Ordinal).Replace("@lock_token", lockToken, StringComparison.Ordinal)
+                .Replace("@i0", id, StringComparison.Ordinal).Replace("@i1", other, StringComparison.Ordinal)
+                .Replace("@t0", lockToken, StringComparison.Ordinal).Replace("@t1", lockToken, StringComparison.Ordinal)
                 .Replace("@worker_id", "'w'", StringComparison.Ordinal).Replace("@lease_us", "1", StringComparison.Ordinal)
                 .Replace("@delay_us", "1", StringComparison.Ordinal).Replace("@error", "'e'", StringComparison.Ordinal);
 
@@ -371,7 +382,8 @@ public sealed class MySqlReviewFollowUpTests(MySqlFixture fixture)
             })
             {
                 var plan = await ExplainKeysAsync(connection, Bind(statement));
-                Assert.True(plan.Contains("key=PRIMARY", StringComparison.Ordinal), $"Expected the primary key:\n{plan}\nfor: {statement}");
+                var usesKey = plan.Contains("key=PRIMARY", StringComparison.Ordinal) || plan.Contains("after reading const tables", StringComparison.Ordinal);
+                Assert.True(usesKey, $"Expected the primary key:\n{plan}\nfor: {statement}");
                 Assert.False(plan.Contains("type=ALL", StringComparison.Ordinal), $"Full scan:\n{plan}\nfor: {statement}");
             }
         }
@@ -383,13 +395,15 @@ public sealed class MySqlReviewFollowUpTests(MySqlFixture fixture)
 
     private static async Task<string> ExplainKeysAsync(MySqlConnection connection, string statement)
     {
-        await using var command = new MySqlCommand("EXPLAIN " + statement, connection);
+        // MySQL 9 changed EXPLAIN's default format; MariaDB has only the traditional one.
+        var explain = connection.ServerVersion.Contains("MariaDB", StringComparison.OrdinalIgnoreCase) ? "EXPLAIN " : "EXPLAIN FORMAT=TRADITIONAL ";
+        await using var command = new MySqlCommand(explain + statement, connection);
         await using var reader = await command.ExecuteReaderAsync();
         var lines = new List<string>();
         while (await reader.ReadAsync())
         {
             string Column(string name) => reader.GetOrdinal(name) is var i && !reader.IsDBNull(i) ? Convert.ToString(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture)! : "-";
-            lines.Add($"type={Column("type")} key={Column("key")}");
+            lines.Add($"type={Column("type")} key={Column("key")} extra={Column("Extra")}");
         }
 
         return string.Join('\n', lines);

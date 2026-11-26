@@ -11,6 +11,9 @@ namespace DbRelay;
 /// </summary>
 public static class MySqlDbRelayBuilderExtensions
 {
+    /// <summary>64 (MySQL's identifier limit) minus the 6 characters of the generated CHECK constraint name's <c>_chk_1</c>.</summary>
+    private const int MaxTableNameLength = 58;
+
     private static readonly TimeSpan MaxCommandTimeout = TimeSpan.FromHours(1);
 
     /// <summary>
@@ -68,6 +71,13 @@ public static class MySqlDbRelayBuilderExtensions
         {
             throw new ArgumentException(
                 $"MySqlOutboxOptions.TableName '{MySqlOutboxSql.VersionTableName}' is reserved for DbRelay's schema version table.", nameof(configure));
+        }
+
+        if (table.Length > MaxTableNameLength)
+        {
+            // MySQL names the table's CHECK constraint <table>_chk_1, within its 64-character identifier limit.
+            throw new ArgumentException(
+                $"MySqlOutboxOptions.TableName can be at most {MaxTableNameLength} characters on MySQL.", nameof(configure));
         }
 
         if (options.CommandTimeout < TimeSpan.FromSeconds(1) || options.CommandTimeout > MaxCommandTimeout)

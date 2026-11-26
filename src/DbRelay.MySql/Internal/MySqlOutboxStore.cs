@@ -130,23 +130,29 @@ internal sealed class MySqlOutboxStore : IOutboxStore, IOutboxBatchStore
     /// <summary>
     /// MY-02: a statement larger than the server's <c>max_allowed_packet</c> makes the server close the connection, which on the
     /// caller's connection would end their transaction. A call that could come close is checked against the server's limit first,
-    /// and rejected with an explanation instead, leaving the connection and transaction intact. The size is estimated
-    /// conservatively: MySqlConnector sends binary values escaped (at most two bytes per byte) and text as UTF-8 (at most four
-    /// bytes per character).
+    /// and rejected with an explanation instead, leaving the connection and transaction intact. The size counts the bytes as sent:
+    /// escaped binary and UTF-8 text (see <see cref="EscapedLength(ReadOnlySpan{byte})"/>).
     /// </summary>
     private async Task CheckPacketSizeAsync(MySqlConnection connection, MySqlTransaction? transaction, IReadOnlyList<OutboxRecord> records, CancellationToken cancellationToken)
     {
+        // A cheap upper bound first (every byte escaped, every character four UTF-8 bytes); most calls stop here.
+        long bound = 0;
+        foreach (var record in records)
+        {
+            bound += StatementBytesPerRow + (2L * record.Payload.Length) + (8L * TextLength(record));
+        }
+
+        if (bound < PacketCheckThreshold)
+        {
+            return; // every supported server allows at least this much
+        }
+
+        // Then the size as sent: each payload byte, plus one for each byte MySQL escaping may double; each text's UTF-8 bytes, likewise.
         long estimate = 0;
         foreach (var record in records)
         {
-            estimate += 400 + (2L * record.Payload.Length)
-                + (4L * ((record.HeadersJson?.Length ?? 0) + record.MessageType.Length + record.ContentType.Length
-                    + (record.Destination?.Length ?? 0) + (record.CorrelationId?.Length ?? 0) + (record.CausationId?.Length ?? 0)));
-        }
-
-        if (estimate < PacketCheckThreshold)
-        {
-            return; // every supported server allows at least this much
+            estimate += StatementBytesPerRow + EscapedLength(record.Payload.Span) + EscapedLength(record.MessageType) + EscapedLength(record.ContentType)
+                + EscapedLength(record.Destination) + EscapedLength(record.HeadersJson) + EscapedLength(record.CorrelationId) + EscapedLength(record.CausationId);
         }
 
         var limit = await GetMaxAllowedPacketAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
@@ -156,6 +162,50 @@ internal sealed class MySqlOutboxStore : IOutboxStore, IOutboxBatchStore
                 $"This enqueue call is too large for the server: its statement may be up to {estimate:N0} bytes, and the server's max_allowed_packet is {limit:N0} bytes. " +
                 "Enqueue the messages in several calls (in the same transaction if they must commit together), or raise max_allowed_packet. Nothing was sent.");
         }
+    }
+
+    /// <summary>Statement text per row (column list share, UNHEX, COALESCE and the parameter placeholders' values), generously.</summary>
+    private const int StatementBytesPerRow = 600;
+
+    private static int TextLength(OutboxRecord record) =>
+        record.MessageType.Length + record.ContentType.Length + (record.Destination?.Length ?? 0) + (record.HeadersJson?.Length ?? 0)
+        + (record.CorrelationId?.Length ?? 0) + (record.CausationId?.Length ?? 0);
+
+    /// <summary>
+    /// The bytes a value takes in the statement text: its length plus one for every byte that MySQL string escaping may double
+    /// (NUL, newline, carriage return, Ctrl-Z, both quotes and backslash). An upper bound for what MySqlConnector sends.
+    /// </summary>
+    private static long EscapedLength(ReadOnlySpan<byte> value)
+    {
+        long length = value.Length;
+        foreach (var b in value)
+        {
+            if (b is 0x00 or 0x0A or 0x0D or 0x1A or 0x22 or 0x27 or 0x5C)
+            {
+                length++;
+            }
+        }
+
+        return length;
+    }
+
+    private static long EscapedLength(string? value)
+    {
+        if (value is null)
+        {
+            return 0;
+        }
+
+        long length = System.Text.Encoding.UTF8.GetByteCount(value);
+        foreach (var c in value)
+        {
+            if (c is '\0' or '\n' or '\r' or '\x1a' or '"' or '\'' or '\\')
+            {
+                length++;
+            }
+        }
+
+        return length;
     }
 
     /// <summary>The server's <c>max_allowed_packet</c>, read on the given connection and cached per server for a few minutes.</summary>

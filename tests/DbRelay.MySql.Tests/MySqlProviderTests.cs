@@ -109,6 +109,8 @@ public sealed class MySqlProviderTests(MySqlFixture fixture)
         Assert.Throws<ArgumentException>(() => Build(relay => relay.UseMySql(AnyConnectionString, o => o.TableName = "dbrelay_schema_version")));
         Assert.Throws<ArgumentOutOfRangeException>(() => Build(relay => relay.UseMySql(AnyConnectionString, o => o.CommandTimeout = TimeSpan.Zero)));
         Assert.Throws<ArgumentException>(() => Build(relay => relay.UseMySql(" ")));
+        var tooLong = Assert.Throws<ArgumentException>(() => Build(relay => relay.UseMySql(AnyConnectionString, o => o.TableName = "t" + new string('x', 58))));
+        Assert.Contains("at most 58 characters", tooLong.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -190,11 +192,11 @@ public sealed class MySqlProviderTests(MySqlFixture fixture)
     }
 
     [Fact]
-    public async Task Two_outbox_tables_can_share_a_database_including_63_character_names()
+    public async Task Two_outbox_tables_can_share_a_database_including_58_character_names()
     {
         RequireDatabase();
         var schema = NewSchemaName();
-        var longTable = "t" + new string('x', 62);
+        var longTable = "t" + new string('x', 57); // the longest MySQL table name (its CHECK constraint is <table>_chk_1)
         await CreateSchemaAsync(fixture, schema);
         await using var first = BuildFor(schema, "outbox_a");
         await using var second = BuildFor(schema, longTable);
@@ -428,7 +430,9 @@ public sealed class MySqlProviderTests(MySqlFixture fixture)
     /// <summary>Returns the EXPLAIN rows of <paramref name="statement"/> as "table=... type=... key=..." lines.</summary>
     private static async Task<string> PlanAsync(MySqlConnection connection, string statement)
     {
-        await using var command = new MySqlCommand("EXPLAIN " + statement, connection);
+        // MySQL 9 changed EXPLAIN's default format; MariaDB has only the traditional one.
+        var explain = connection.ServerVersion.Contains("MariaDB", StringComparison.OrdinalIgnoreCase) ? "EXPLAIN " : "EXPLAIN FORMAT=TRADITIONAL ";
+        await using var command = new MySqlCommand(explain + statement, connection);
         await using var reader = await command.ExecuteReaderAsync();
         var lines = new List<string>();
         while (await reader.ReadAsync())
