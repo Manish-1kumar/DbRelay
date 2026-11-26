@@ -17,7 +17,7 @@ implementing agent reported.
 | T5.1 | PostgreSQL provider | postgresql-engineer | COMPLETED | 300/300 | Reviewed; CR-03 fixed | Tested on PG 17.5 only (CI matrix adds 15/16/18) |
 | T6.1 | Dispatcher, retry, maintenance, health, diagnostics | Architect | REVIEWED | Unit dispatcher tests + integration | CR-04/05/06/09/10/19/25 fixed; follow-up audit in progress | |
 | T7.1 | Crash recovery and dead-letter | Architect + QA | COMPLETED | Process-kill + crash-loop integration tests | Reviewed | |
-| T8.1 | SQL Server provider | sqlserver-engineer | COMPLETED | 372/372 | Reviewed | K6 (one unreproduced overload failure); SQL Server 2022 Express only; package deferred to 0.2.0 |
+| T8.1 | SQL Server provider | sqlserver-engineer | COMPLETED | 372/372 | Reviewed | K6 (one unreproduced overload failure); SQL Server 2022 Express only; package released in 0.2.0 |
 | T9.1 | Integration, crash, concurrency, interruption, security tests | qa-reliability | COMPLETED | 68/68 (×2 consecutive) | Reviewed; 2 tests revised for CR-05/CR-06 | Integration suite runs on PostgreSQL only |
 | T10.1 | Benchmarks | Architect | COMPLETED | `docs/benchmarks.md` | n/a | Single-machine baseline |
 | T11.1 | Docs and samples | docs-devex | COMPLETED | 3 samples built and run; snippets compiled | Architect spot-check and post-fix updates | NuGet README relative links (needs the repository URL) |

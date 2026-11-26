@@ -2,8 +2,8 @@
 
 _Last updated: 2026-11-26_
 
-**Phase:** **0.1.0 released to NuGet** (2026-11-26): `DbRelay.Abstractions`, `DbRelay`, `DbRelay.PostgreSql`. The
-`DbRelay.SqlServer` package follows in 0.2.0. Public at https://github.com/Manish-1kumar/DbRelay (since 2026-11-22; private
+**Phase:** **0.2.0 released to NuGet** (2026-11-26): `DbRelay.Abstractions`, `DbRelay`, `DbRelay.PostgreSql` and, for the
+first time, `DbRelay.SqlServer`. 0.1.0 was released earlier the same day. Public at https://github.com/Manish-1kumar/DbRelay (since 2026-11-22; private
 vulnerability reporting enabled). Open owner items are in RELEASE_CHECKLIST.md.
 
 | Milestone | Status | Notes |
@@ -15,7 +15,7 @@ vulnerability reporting enabled). Open owner items are in RELEASE_CHECKLIST.md.
 | M5 PostgreSQL provider | COMPLETED | 300/300; reviewed |
 | M6 Dispatcher | COMPLETED | Reviewed; 4 behaviour fixes from review (CR-05/06/09/10) |
 | M7 Retry, dead-letter, crash recovery | COMPLETED | Process-kill and crash-loop tests pass |
-| M8 SQL Server provider | COMPLETED | 380/380 (RCSI off/on); ADR 0002; package deferred to 0.2.0 per brief |
+| M8 SQL Server provider | COMPLETED | 380/380 (RCSI off/on); ADR 0002; package released in 0.2.0 |
 | M9 Integration, reliability, security | COMPLETED | Integration 76/76; two review passes: 0 Critical, 2 High (fixed), 6 Medium (fixed) |
 | M10 Benchmarks | COMPLETED | `docs/benchmarks.md` |
 | M11 Docs + samples | COMPLETED | README, 9 guides, 3 samples (run against real DBs) |

@@ -15,11 +15,11 @@ apart from the registration call; see [the SQL Server section](#sql-server).
 Add the provider package, which brings in `DbRelay` and `DbRelay.Abstractions`:
 
 ```shell
-dotnet add package DbRelay.PostgreSql --version 0.1.0
+dotnet add package DbRelay.PostgreSql --version 0.2.0
 ```
 
-The SQL Server package ships in 0.2.0. Until then, reference the project instead:
-`<ProjectReference Include="path/to/src/DbRelay.SqlServer/DbRelay.SqlServer.csproj" />`.
+For SQL Server, add `DbRelay.SqlServer` instead (see [SQL Server](#sql-server)):
+`dotnet add package DbRelay.SqlServer --version 0.2.0`.
 
 The samples also use Dapper for business writes. DbRelay itself does not depend on Dapper: it works with any code that holds
 an `NpgsqlTransaction` or `SqlTransaction`.
@@ -204,7 +204,7 @@ time; claims never overlap. Retention cleanup still runs in every application un
 
 ## SQL Server
 
-Reference `src/DbRelay.SqlServer` and use `UseSqlServer`. Everything else is the same, with `SqlConnection` and
+Add the `DbRelay.SqlServer` package and use `UseSqlServer`. Everything else is the same, with `SqlConnection` and
 `SqlTransaction`. From [`samples/SqlServer.Sample`](../samples/SqlServer.Sample):
 
 ```csharp

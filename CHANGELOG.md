@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-26
+
+The SQL Server package. No breaking changes: 0.1.0 code compiles and runs unchanged.
+
 ### Added
 
 - **The `DbRelay.SqlServer` package.** The provider shipped as source in 0.1.0. Its public API is unchanged:
@@ -107,5 +111,6 @@ First release.
 
 See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the Limitations section of the [README](README.md#limitations).
 
-[Unreleased]: https://github.com/Manish-1kumar/DbRelay/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Manish-1kumar/DbRelay/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Manish-1kumar/DbRelay/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Manish-1kumar/DbRelay/releases/tag/v0.1.0

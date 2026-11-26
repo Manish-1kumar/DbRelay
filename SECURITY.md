@@ -6,7 +6,8 @@ DbRelay is pre-1.0. Security fixes are made on the latest `0.x` release only.
 
 | Version | Supported |
 |---|---|
-| 0.1.x | Yes |
+| 0.2.x | Yes |
+| 0.1.x | No (upgrade to 0.2.x; no breaking changes) |
 
 ## Reporting a vulnerability
 
