@@ -1750,3 +1750,507 @@ disproved by the deterministic test it describes, before release.
 | OR-11 | Info | **Fixed.** Claimed rows are read by primary key on a DbRelay command (`InitialLOBFetchSize = -1`), in bucketed IN lists, instead of through a REF CURSOR. |
 | OR-12 | Info | **Fixed.** The health check fails while one of the three indexes is missing or unusable (`Health_check_fails_while_an_index_is_missing_or_unusable`). |
 | OR-13 | Info | **Fixed.** New tests: large LOBs, a BA-07-style deadlock stress test (0 ORA-00060 retries), and the dispatcher end to end across a shutdown. Plus an Oracle soak (`.github/workflows/soak.yml`). |
+
+## MySQL provider review (ADR 0006), 2026-11-27
+
+Independent review of branch `mysql-provider` against `oracle-provider` (`git diff oracle-provider...mysql-provider`). I reviewed
+at `77f9a55`. During the review the branch moved to `7293232`. The two new commits (`ad8ca95` and `7293232`) touch only the soak
+harness and its workflow (`tests/DbRelay.Soak/**`, `.github/workflows/soak-mysql.yml`), not the provider or its tests. Scope:
+- `src/DbRelay.MySql/**`;
+- `tests/DbRelay.MySql.Tests/**`;
+- `tests/Shared/TestSchemaNames.cs` (the MySQL sweep);
+- `docs/decisions/0006-mysql-provider.md`.
+
+PostgreSQL, SQL Server and Oracle (including the OR-01..OR-13 fixes) were the reference.
+
+**Evidence limits.** There is no MySQL or MariaDB server on this machine, so none of the 62 database tests ran here, and I make
+no claim that they pass. The CI result the caller cites (run 45886270423: 88/88 on MySQL 8.4 on 4 TFMs, MySQL 8.0.46, MariaDB
+10.11.19 and 11.4.13) is the only database evidence, and I did not re-verify it. "Reasoned" means the finding comes from reading
+the code and from documented InnoDB or MySqlConnector behaviour. "Verified" means I checked it here. For MySqlConnector, I read
+the string literals in the 2.6.2 `MySqlConnector.dll` from the NuGet cache.
+
+### Test results (run by me)
+
+| Command | Result |
+|---|---|
+| `dotnet build tests/DbRelay.MySql.Tests/DbRelay.MySql.Tests.csproj -c Release` | Build succeeded, 0 warnings, 0 errors (net8.0, net9.0, net10.0, net11.0) |
+| `dotnet test --project tests/DbRelay.MySql.Tests -c Release -f net10.0 --no-build` (without `DBRELAY_TEST_MYSQL`) | total 88: **26 succeeded** (registration, naming, script and statement-shape tests), **62 skipped** ("No MySQL or MariaDB server available"), 0 failed |
+| `dotnet format src/DbRelay.MySql/DbRelay.MySql.csproj --verify-no-changes`; the same for `tests/DbRelay.MySql.Tests` | exit 0 for both |
+
+### What was checked and found sound
+
+- **Invariants 1 and 2 (caller resources).**
+  - `InsertAsync` runs one `INSERT` on exactly the caller's `MySqlConnection` and `MySqlTransaction`, and never opens, closes,
+    commits, rolls back or disposes either. DbRelay never begins a transaction on a caller connection.
+  - Core `Outbox.ValidateCallerResources` checks the pairing, rejects completed transactions and closed connections. The
+    provider checks the types.
+  - With `IgnoreCommandTransaction=true`, MySqlConnector runs the command in the connection's active transaction. Because of
+    the pairing check, that is the caller's transaction, so the invariant still holds.
+- **Invariant 3.**
+  - Every transaction is opened and committed inside one store call, on a DbRelay-owned connection.
+  - The claim's three statements and the batch acknowledgement's two statements contain no handler call.
+- **Invariant 4 (single-row transitions).**
+  - `MarkDelivered`, `ScheduleRetry`, `MarkDeadLettered` and `Release` are `WHERE id = UNHEX(@id) AND lock_token = UNHEX(@lock_token)`.
+  - Every terminal transition clears `lock_token`, so a token match implies status 1.
+  - The `rows == 1` check is correct under both affected-rows modes: with `UseAffectedRows=false` (the default) MySQL reports
+    found rows, and every matching update changes `status` or `available_at` anyway.
+  - The batch path is discussed in MY-06.
+- **Claim correctness (risk 1).**
+  - `FOR UPDATE` is a current (locking) read. In InnoDB, a row returned by step 1 is the latest committed version, and it stays
+    X-locked until the commit.
+  - Step 3's `status IN (0, 1) AND available_at <= now` re-check therefore cannot fail for a chosen row. It is defence in depth:
+    if step 1 ever returned a row it had not locked, step 3 would lock and re-evaluate it.
+  - Step 4 reads by `lock_token = @fresh token`, so only rows this claim changed are returned. The attempt is counted in
+    step 3 (invariant 10).
+  - SKIP LOCKED never waits, so claimers cannot deadlock with each other or with acknowledgements.
+  - Budget rows that were read but not taken stay locked only until this short transaction commits, as on PostgreSQL and
+    Oracle.
+  - The budget test (`chosen.Count > 0 && bytes >= budget`, with `bytes` summed before the current row) matches the
+    `IOutboxStore.ClaimAsync` contract.
+- **Isolation (risk 2).** Producers insert under the caller's isolation. Their insert-intention locks conflict only with gap
+  locks. DbRelay's claim, batch, cleanup and bulk-requeue transactions are READ COMMITTED, which takes no gap locks here (the
+  only unique index is the PK, and duplicate-key checks happen only on producers' own inserts). Delivered and dead rows sit at
+  the NULL end of `ix_claim`, and new rows have NULL `cleanup_at` and `dead_at`. Under REPEATABLE READ, the cleanup range scan
+  would have gap-locked exactly where producers insert, so the RC choice is the right one.
+  - The autocommitted single-row updates (PK equality) take record locks only, while the row exists. If the row is missing,
+    REPEATABLE READ takes a gap lock for the duration of that one autocommitted statement, which is negligible.
+- **GUIDs and ordering (risk 3).**
+  - `id` is `BINARY(16)` written as `UNHEX` of the "N" string. It is independent of `GuidFormat`, which is tested for three
+    formats.
+  - Core's `Uuid7` builds the GUID big-endian, so the "N" string, and therefore the stored bytes, are time-ordered. InnoDB's
+    clustered inserts are mostly appends.
+  - Ordinal order of the lowercase "N" string equals `memcmp` order of the stored bytes, so the BA-07 lock order is the PK order.
+  - `BINARY(16)` always holds 16 bytes, because shorter values are zero-padded. The OR-06 class of problem (short IDs corrupting
+    a parse) cannot occur.
+  - Padding IN lists by repeating the last ID is harmless.
+- **Batched acknowledgements (risk 4).**
+  - The rows are locked with `FOR UPDATE` in PK order, and the tokens are compared in C# while those locks are held in the same
+    READ COMMITTED transaction. The `UPDATE` then touches only rows that are still locked, so no other session can change a
+    token in between: the update is race-free.
+  - Duplicate pairs are collapsed by `ToHashSet`. A stale and a current token for the same ID give at most one match, and a NULL
+    token never matches.
+- **Clock and types (invariant 5).**
+  - All comparisons use `UTC_TIMESTAMP(6)`, which is constant within a statement.
+  - `DATETIME(6)` is not converted by the session `time_zone`.
+  - Intervals are bound as whole microseconds and clamped to 20,000 days.
+  - `DeliverAt` is a value, bound with `Kind = Unspecified`, so MySqlConnector's `DateTimeKind` option cannot reject it. Reads
+    re-tag values as UTC without converting them.
+- **Invariants 6 to 9.**
+  - No type is activated from database strings.
+  - Every value is a parameter.
+  - Identifiers pass `SqlIdentifier` (no backtick can appear) and are backtick-quoted.
+  - The provider logs nothing, and `last_error` is truncated to `MaxErrorLength`.
+- **Retry (risk 6).**
+  - 1213 rolls back the whole transaction. 1205 rolls back only the statement (with `innodb_rollback_on_timeout=OFF`), but
+    `RunAsync` disposes, and so rolls back, DbRelay's transaction and connection before retrying.
+  - Every retried operation is a single autocommitted statement or a whole DbRelay transaction, so each is safe to run again.
+  - The caller's insert is never retried.
+  - The retry is bounded (3 attempts, 5 to 50 ms times the attempt number of jitter). It is skipped once cancellation is
+    requested, and a `MySqlException` raised under cancellation is mapped to `OperationCanceledException` (tested).
+- **Resources and async.**
+  - Every command, reader, transaction and owned connection is disposed with `await using (... .ConfigureAwait(false))`.
+  - There is no sync-over-async.
+  - `MySqlParameter` holds no unmanaged resources (unlike OR-03).
+- **Schema (risk 7).**
+  - `CREATE TABLE IF NOT EXISTS` with inline indexes and `INSERT IGNORE` is idempotent, and it is safe concurrently under the
+    metadata lock (tested with 4 x 3 concurrent runs).
+  - Long names are bounded to 64 characters with a deterministic hash (unit-tested).
+  - MySQL's per-database CHECK-name rule is satisfied for distinct tables, but see MY-09.
+- **Packaging.** `IsPackable` is false unless `-p:DbRelayPackMySql=true`.
+
+### Findings
+
+| Severity | Count | IDs |
+|---|---|---|
+| Critical | 0 | none |
+| High | 0 | none |
+| Medium | 3 | MY-01, MY-02, MY-03 |
+| Low | 9 | MY-04, MY-05, MY-06, MY-07, MY-08, MY-09, MY-10, MY-11, MY-12 |
+| Info | 4 | MY-13, MY-14, MY-15, MY-16 |
+
+#### MY-01 (Medium): the claim's candidate query reads every candidate's full payload from InnoDB just to compute its length
+
+- **File:**
+  - `src/DbRelay.MySql/Internal/MySqlOutboxSql.cs:73-74` (`SELECT HEX(id), OCTET_LENGTH(payload) ... LIMIT @batch_size FOR UPDATE SKIP LOCKED`);
+  - `src/DbRelay.MySql/Internal/MySqlOutboxStore.cs:147-157`
+- **Failure scenario:**
+  - `payload` is a `LONGBLOB`. With the DYNAMIC row format, any payload larger than a few hundred bytes to about 8 KB is stored
+    off-page.
+  - When a column is in the read set, as it is for `OCTET_LENGTH(payload)`, InnoDB copies the whole externally stored value
+    into the row buffer (`btr_rec_copy_externally_stored_field`, on both MySQL and MariaDB). There is no length-only path.
+  - Step 1 therefore reads up to `BatchSize` full payloads. Step 4 then reads the chosen ones again.
+    - When the budget does not bind, every payload is read twice on each claim.
+    - When it binds, for example `BatchSize = 100` with 100 due 16 MiB messages and a 64 MiB budget, step 1 reads about 1.6 GiB
+      from the buffer pool or disk to claim 4 messages, on every poll while the backlog lasts.
+  - The other providers do not have this cost:
+    - PostgreSQL's `octet_length` on a TOASTed value reads the TOAST header;
+    - SQL Server's `DATALENGTH` and Oracle's LOB length read the LOB root or locator.
+  - Correctness is unaffected. This is read amplification on the hottest path, and it defeats much of what ADR 0004's budget is
+    for.
+- **Evidence:** Reasoned (InnoDB source behaviour); not measured.
+- **Recommendation:**
+  - Before the v1 schema ships, add `payload_size INT UNSIGNED NOT NULL` and write it in the INSERT as `OCTET_LENGTH(@pl{n})`.
+    A `STORED` generated column `AS (OCTET_LENGTH(payload))` works on both engines too.
+  - Read `payload_size` in step 1 instead of `OCTET_LENGTH(payload)`.
+  - Measure before and after by comparing the `Innodb_buffer_pool_read_requests` delta of one claim over 100 x 8 MiB rows with
+    `MaxPayloadBytes = 1`.
+- **Status:** Open
+
+#### MY-02 (Medium): an enqueue that exceeds `max_allowed_packet` makes the server close the caller's connection; core accepts calls larger than the server defaults; the provider guide the ADR requires does not exist
+
+- **File:**
+  - `src/DbRelay.MySql/Internal/MySqlOutboxStore.cs:92-120`;
+  - `docs/decisions/0006-mysql-provider.md:99-100`;
+  - core limit at `src/DbRelay/Outbox.cs:99-106` (a call may total `max(64 MiB, MaxPayloadBytes)`, and `MaxPayloadBytes` can be up
+    to 256 MiB)
+- **Failure scenario:**
+  - The 1,000-row INSERT is sent as one statement. MySqlConnector substitutes parameters on the client, so the packet holds the
+    payloads (escaped as `_binary'...'`, up to 2x for bytes such as 0x00), the headers and about 270 KB of statement text.
+  - The server's `max_allowed_packet` defaults to 64 MiB on MySQL 8 and 16 MiB on MariaDB. On a larger packet, the server
+    raises ER_NET_PACKET_TOO_LARGE and **closes the connection** (MySQL manual, "Packet Too Large"). MySqlConnector 2.6.2
+    reports "Error submitting {0}MB packet; ensure 'max_allowed_packet' is greater than {1}MB." (verified in the DLL).
+  - On the transactional path, that connection is the caller's, so the caller's business transaction is aborted and its
+    connection is dead.
+    - Atomicity holds, because everything rolls back.
+    - But no other provider turns an oversized enqueue into a lost connection.
+    - On MariaDB with defaults, about 17 MiB of payload in one `EnqueueManyAsync` triggers it, well within what core accepts.
+  - The ADR's mitigation ("The provider guide must say so") has not been done: there is no `docs/mysql.md`.
+- **Evidence:** Reasoned (documented server behaviour, plus the MySqlConnector message). No test covers it.
+- **Recommendation:**
+  - Read `@@max_allowed_packet` once on a DbRelay connection and cache it.
+  - In `InsertCoreAsync`, estimate the packet size (2 x payload bytes, plus 2 x header characters, plus the statement text
+    length) and throw an `ArgumentException` naming the limit *before* sending. The caller's connection and transaction then
+    stay usable.
+  - Write `docs/mysql.md` covering `max_allowed_packet` and the other items in MY-05, MY-07, MY-11 and MY-15.
+  - Add a provider test: `SET GLOBAL max_allowed_packet` to a small value in the container, enqueue in a caller transaction,
+    then assert the clear exception and that the caller's connection still runs `SELECT 1`.
+- **Status:** Open
+
+#### MY-03 (Medium): the INSERT text is cached for every row count from 1 to 1,000, which retains up to about 259 MiB per registration
+
+- **File:** `src/DbRelay.MySql/Internal/MySqlOutboxSql.cs:41, 168-173, 252-266`
+- **Failure scenario:**
+  - `GetInsert(rows)` caches one string per distinct row count.
+  - I replicated `BuildInsert` (default names): 1,000 rows is 271,872 characters. All 1,000 sizes total 135.6 M characters,
+    about **259 MiB** of UTF-16 strings, mostly on the large object heap and never released. Sizes 1 to 100 alone are 2.5 MiB.
+  - Applications whose `EnqueueManyAsync` sizes vary, such as bulk jobs whose last chunk varies or per-order line items, collect
+    a new size each time they see one.
+  - The Oracle provider explicitly stopped caching texts above 90 rows for this reason (`OracleOutboxSql.cs:285-288`: "a block
+    for 1,000 rows is about 300 KB of text"). SQL Server caches only up to its per-statement row cap.
+- **Evidence:** Verified (length computation); retention follows from the `ConcurrentDictionary`.
+- **Recommendation:**
+  - Cache only up to a small row count (for example 64), and build larger texts per call. A 272K-character `StringBuilder` is
+    small next to sending the rows.
+  - Optionally shorten each row: the `due` expression is emitted twice per row. Binding one precomputed `@dl` or `@da` per row,
+    or using a derived table, halves the text.
+  - Add a unit test that bounds the cache size after `GetInsert(1..1000)`.
+- **Status:** Open
+
+#### MY-04 (Low): MySqlConnector sets the isolation level for the *session*; with `ConnectionReset=false`, pooled sessions shared with the application stay at READ COMMITTED
+
+- **File:** `src/DbRelay.MySql/Internal/MySqlConnectionSource.cs:98` (`BeginTransactionAsync(IsolationLevel.ReadCommitted, ...)`)
+- **Failure scenario:**
+  - MySqlConnector 2.6.2 implements an explicit isolation level as `set session transaction isolation level <level>` followed
+    by `start transaction` (verified from the string literals in the DLL). The session keeps READ COMMITTED after DbRelay's
+    commit.
+  - With the default `ConnectionReset=true`, the pool resets the session, so there is no effect.
+  - With `ConnectionReset=false`, which some performance guides recommend, and `UseMySql(connectionString)` sharing the pool
+    with the application's own connections, later application work on that pooled session runs at READ COMMITTED instead of the
+    server default (REPEATABLE READ). That applies to `BeginTransaction()` without a level (MySqlConnector then sends no SET)
+    and to autocommitted statements. The application's semantics change silently: non-repeatable reads, and different locking.
+- **Evidence:** Verified (MySqlConnector string literal). The effect with `ConnectionReset=false` is reasoned.
+- **Recommendation:**
+  - Run `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` (next-transaction scope, no `SESSION`), then
+    `BeginTransactionAsync()` with no level. First confirm that MySqlConnector sends no SET for `Unspecified`.
+  - Alternatively, give DbRelay its own pool by adding a distinguishing option to the connection string.
+  - Add a test on a `ConnectionReset=false;Maximum Pool Size=1` connection string: after a claim, `SELECT @@session.transaction_isolation`
+    on the next pooled connection equals the global value.
+- **Status:** Open
+
+#### MY-05 (Low): with `binlog_format=STATEMENT`, every DbRelay write in READ COMMITTED fails with error 1665, while the health check stays green
+
+- **File:** `src/DbRelay.MySql/Internal/MySqlConnectionSource.cs:79-81, 98`; `src/DbRelay.MySql/Internal/MySqlOutboxSql.cs:114` (health check)
+- **Failure scenario:**
+  - InnoDB refuses statement-based binary logging under READ COMMITTED, on both MySQL and MariaDB: "impossible to write to
+    binary log since BINLOG_FORMAT = STATEMENT ... InnoDB is limited to row-logging when transaction isolation level is READ
+    COMMITTED".
+  - On a server with `log_bin=ON` and `binlog_format=STATEMENT`, which is legacy and deprecated in 8.0.34 but still found, these
+    all fail on every call: the claim UPDATE, batch acknowledgements, cleanup and bulk requeue.
+  - Producers' inserts, at the caller's isolation, succeed. Messages therefore pile up undelivered.
+  - `SELECT 1 FROM t LIMIT 1` still passes, so the health check reports healthy. ROW and MIXED (the defaults) are unaffected.
+- **Evidence:** Reasoned (documented server rule).
+- **Recommendation:**
+  - In `CheckHealthAsync` (and optionally `EnsureCreatedAsync`), fail with an explanatory message when
+    `@@log_bin = 1 AND @@session.binlog_format = 'STATEMENT'`.
+  - Document the requirement in `docs/mysql.md`.
+- **Status:** Open
+
+#### MY-06 (Low): the batched acknowledgement UPDATE has no lock-token predicate in SQL, and its affected-row count is not checked
+
+- **File:** `src/DbRelay.MySql/Internal/MySqlOutboxSql.cs:207-216`; `src/DbRelay.MySql/Internal/MySqlOutboxStore.cs:297-310`
+- **Failure scenario:**
+  - The guard is correct today: the token is compared in C# while the `FOR UPDATE` locks are held in the same transaction.
+  - Invariant 4, however, is written as "every state change after a claim is guarded by `WHERE id = @id AND lock_token = @token`",
+    and this is the only post-claim statement in any provider whose SQL has no token predicate. SQL Server joins on
+    `(id, lock_token)`.
+  - The guard depends on two things staying true, and neither is pinned by a test:
+    1. both statements stay in one transaction;
+    2. step 1 stays a locking read.
+  - A refactor, for example moving step 1 to `ExecuteAsync`, dropping `FOR UPDATE` to reduce waits, or a future autocommit path,
+    would silently turn the batch into an unguarded update that overwrites a newer claim.
+  - The `ExecuteNonQueryAsync` result is discarded, so such a regression would not be detected at run time.
+- **Evidence:** Verified (code).
+- **Recommendation:**
+  - Use `WHERE (id, lock_token) IN ((UNHEX(@i0), UNHEX(@t0)), ...)`. Row-constructor IN is range-optimized on the PK in MySQL
+    8.0 and MariaDB.
+  - Check that the returned count equals `matchedIds.Count`. Every matched row changes, so the count is the same under either
+    affected-rows mode. On a mismatch, throw so that the transaction rolls back.
+- **Status:** Open
+
+#### MY-07 (Low): with `Schema = null`, the caller's insert goes to the caller connection's current database, which may not be the one the dispatcher polls
+
+- **File:** `src/DbRelay.MySql/Internal/MySqlOutboxSql.cs:248` (unqualified names); `src/DbRelay.MySql/Internal/MySqlOutboxStore.cs:52-74`; `docs/decisions/0006-mysql-provider.md:33`
+- **Failure scenario:**
+  - In MySQL, a schema is a database, and applications often pick it per connection: `Database=` per tenant, `USE`, or
+    `ChangeDatabase`.
+  - Suppose `UseMySql("...;Database=app")` is registered and a caller enqueues on a connection whose current database is
+    `tenant_42`.
+    - If `tenant_42.outbox_messages` exists (for example, every tenant database was created from the same script), the message
+      commits there and this host's dispatcher never sees it. That is a silent stall.
+    - Otherwise the insert fails with 1146.
+  - Oracle has the same rule, but switching the current schema is far less common there than switching databases on MySQL.
+- **Evidence:** Reasoned.
+- **Recommendation:**
+  - When `Schema` is null, record the database of DbRelay's own connections: from `MySqlConnectionStringBuilder.Database`, or
+    from `connection.Database` after the first open.
+  - In `InsertAsync`, compare it with the caller's `connection.Database` (no round trip; MySqlConnector tracks `USE`), and throw
+    an explanatory `InvalidOperationException` on a mismatch.
+  - Alternatively, qualify every statement with the resolved database.
+  - Document the rule in `docs/mysql.md`.
+- **Status:** Open
+
+#### MY-08 (Low): `CREATE TABLE IF NOT EXISTS` accepts an existing table of any shape, and the health check cannot tell
+
+- **File:** `src/DbRelay.MySql/Scripts/001_create_outbox.sql:21-52`; `src/DbRelay.MySql/Internal/MySqlOutboxSql.cs:114`
+- **Failure scenario:**
+  - If `outbox_messages` already exists with another definition (an earlier hand-written script, a table from another tool, or
+    an index a DBA dropped), `EnsureCreatedAsync` succeeds and `CheckHealthAsync` passes.
+  - Then either the first claim fails with "Unknown column 'claim_at'", or, without `ix_claim`, every claim becomes a full-table
+    `FOR UPDATE SKIP LOCKED` scan (see MY-12).
+  - Oracle fixed this class of problem in OR-12: its health check fails while an index is missing or unusable.
+- **Evidence:** Reasoned.
+- **Recommendation:**
+  - Make the health check `SELECT claim_at, cleanup_at, dead_at, lock_token FROM t LIMIT 0`.
+  - Add a check that `information_schema.STATISTICS` has the three configured index names for the table, as Oracle does.
+- **Status:** Open
+
+#### MY-09 (Low): on MySQL, an explicitly named CHECK constraint keeps its name across `RENAME TABLE`, so re-creating the outbox after renaming the old table aside fails
+
+- **File:** `src/DbRelay.MySql/Scripts/001_create_outbox.sql:51`; `src/DbRelay.MySql/Internal/MySqlOutboxSql.cs:54`
+- **Failure scenario:**
+  - MySQL CHECK constraint names are unique per database. `RENAME TABLE` renames only generated names of the form
+    `<table>_chk_N`; user-named constraints keep their names.
+  - A common operation is `RENAME TABLE outbox_messages TO outbox_messages_2026` followed by `EnsureCreatedAsync` to start a
+    fresh table. That fails with ER_CHECK_CONSTRAINT_DUP_NAME (3822) for `ck_outbox_messages_status`.
+  - MariaDB scopes CHECK names per table, so it is unaffected.
+- **Evidence:** Reasoned (MySQL documentation on CHECK constraint naming).
+- **Recommendation:**
+  - Use an unnamed CHECK (`CHECK (status BETWEEN 0 AND 3)`), so that MySQL generates `<table>_chk_1` and renames it with the
+    table.
+  - Alternatively, document the rename procedure (drop or rename the constraint first).
+- **Status:** Open
+
+#### MY-10 (Low): every `InvalidOperationException` on a no-transaction insert is reported as "the connection has a transaction in progress"
+
+- **File:** `src/DbRelay.MySql/Internal/MySqlOutboxStore.cs:61-69`
+- **Failure scenario:**
+  - MySqlConnector raises `InvalidOperationException` for several other caller mistakes.
+    - The most common is "This MySqlConnection is already in use", for example while an unbuffered Dapper reader is still open
+      on the same connection (MySQL has no MARS). The string is verified in the 2.6.2 DLL.
+  - With `transaction: null`, DbRelay rewrites any of these into "no transaction was passed while the connection has a
+    transaction in progress. Pass that transaction..." That sends the developer the wrong way. The original is only the inner
+    exception.
+  - This is the same over-broad catch as OR-04's first residual risk. Here it only produces a wrong message.
+- **Evidence:** Verified (code, plus the MySqlConnector string).
+- **Recommendation:**
+  - Wrap only the transaction-mismatch error: MySqlConnector's text says the transaction "is not the connection's active
+    transaction; see https://mysqlconnector.net/trans".
+  - Alternatively, make the wrapper neutral: "MySqlConnector rejected the outbox insert; if the connection has a transaction in
+    progress, pass it ...".
+  - Add a test with an open reader on the connection.
+- **Status:** Open
+
+#### MY-11 (Low): the supported range is wider than the tested one; MariaDB 11.8 LTS turns on `innodb_snapshot_isolation` by default
+
+- **File:**
+  - `docs/decisions/0006-mysql-provider.md` (Scope: "MySQL 8.0 and later", "MariaDB 10.11 and later");
+  - `.github/workflows/ci.yml` (matrix: 8.0, 8.4, 10.11, 11.4);
+  - `src/DbRelay.MySql/Internal/MySqlConnectionSource.cs:123-124`
+- **Failure scenario:**
+  - From MariaDB 11.6.2, and so in 11.8 LTS, `innodb_snapshot_isolation=ON` by default. Under REPEATABLE READ, locking a record
+    changed after the transaction's read view was created raises ER_CHECKREAD (1020, "Record has changed since last read").
+  - DbRelay's own transactions are READ COMMITTED, so they are unaffected.
+  - The autocommitted single-row transitions and `Requeue`, however, run at the session default (normally REPEATABLE READ),
+    and 1020 is not in `IsRetriable`.
+    - Whether an autocommitted UPDATE without a consistent read opens a read view, and so can hit 1020 when it waits behind a
+      batch or cleanup transaction, is unverified.
+    - If it can, guarded acknowledgements fail spuriously under contention on the current MariaDB LTS.
+  - MySQL 9.x LTS is likewise inside "8.0 and later" but untested.
+- **Evidence:** Unverified (engine behaviour). The test gap itself is verified.
+- **Recommendation:**
+  - Add MariaDB 11.8 (and, when available, MySQL 9.x LTS) to `mysql-compat`, including the BA-07 stress test.
+  - Either add 1020 to the retried errors for DbRelay-owned statements, or run the guarded single-row updates in RC
+    transactions too.
+  - Until then, state the tested versions in the ADR and the guide.
+- **Status:** Open
+
+#### MY-12 (Low): the claim depends on the optimizer choosing `ix_claim`; a filesort plan would lock every due row for the whole claim
+
+- **File:** `src/DbRelay.MySql/Internal/MySqlOutboxSql.cs:73-74`; `tests/DbRelay.MySql.Tests/MySqlProviderTests.cs:376-420`
+- **Failure scenario:**
+  - With an index-ordered range scan, `LIMIT n` stops after n locked rows.
+  - If the optimizer instead picks a table scan or `ix_claim` range plus filesort, InnoDB locks every row it reads before the
+    sort, and the `LIMIT` is applied afterwards. Causes include:
+    - small or freshly bulk-loaded tables with stale statistics;
+    - MariaDB 11's new cost model;
+    - a missing index (MY-08).
+  - Under READ COMMITTED, rows cut by `LIMIT` keep their locks: only rows failing the WHERE are unlocked. Every due row then
+    stays locked until the commit, which includes step 4's payload transfer. Concurrent claimers find nothing, so throughput
+    collapses to one effective claimer.
+  - The plan test pins the plan for one 20,000-row, freshly analysed dataset only.
+  - The Oracle provider hints its claim index.
+- **Evidence:** Reasoned.
+- **Recommendation:**
+  - Add `FORCE INDEX (ix_claim)`, which both engines support, to `ClaimCandidates`.
+  - Likewise consider `FORCE INDEX (ix_cleanup)` and `(ix_dead)` for the `ORDER BY ... LIMIT` maintenance statements.
+  - Extend the plan test with a 50-row table that has not been analysed.
+- **Status:** Open
+
+#### MY-13 (Info): documentation drift and gaps
+
+- **File:**
+  - `docs/decisions/0006-mysql-provider.md:84, 86, 95, 99-100`;
+  - `src/DbRelay.MySql/Internal/MySqlConnectionSource.cs:74-78`;
+  - `tests/DbRelay.MySql.Tests/MySqlFixture.cs:30`;
+  - `CONTRIBUTING.md`, `IMPLEMENTATION_TRACKER.md`, `PROJECT_STATUS.md`
+- **Details:**
+  - The ADR says 1213 and 1205 are retried for transactions "which the server has rolled back". For 1205 inside a DbRelay
+    transaction, InnoDB rolls back only the statement; DbRelay's dispose rolls back the rest. The code is right and the
+    sentence is not.
+  - "Within the 65,535-parameter limit" applies only to server-side prepared statements. DbRelay never calls `Prepare`, so the
+    real limit is `max_allowed_packet` (MY-02).
+  - "`transaction: null` ... MySqlConnector rejects the command" does not hold with `IgnoreCommandTransaction=true`. In that
+    case the insert silently joins the active transaction. That outcome is safe, but it should be documented.
+  - There is no `docs/mysql.md`, although the ADR requires one.
+  - The fixture's skip message says "see CONTRIBUTING.md", but `CONTRIBUTING.md` does not mention `DBRELAY_TEST_MYSQL`.
+  - `IMPLEMENTATION_TRACKER.md` and `PROJECT_STATUS.md` have no MySQL entries (CLAUDE.md: track work in the tracker).
+- **Recommendation:** Fix the three ADR sentences. Add the guide, the CONTRIBUTING entry and the tracker rows.
+- **Status:** Open
+
+#### MY-14 (Info): the public SPI insert methods accept more than 1,000 records and then commit them in separately autocommitted chunks
+
+- **File:** `src/DbRelay.MySql/Internal/MySqlOutboxStore.cs:76-120`
+- **Failure scenario:**
+  - Core never passes more than `MaxEnqueueBatchSize` records. `IOutboxStore` is public, however, and the store does not check.
+  - A direct caller with 1,500 records and `transaction: null` gets two autocommitted statements. If the second fails, the first
+    stays committed.
+  - On `InsertStandaloneAsync`, a 1213 in the second chunk retries the whole operation, which re-inserts chunk 1 and fails with
+    1062.
+  - The XML comment on `ExecuteAsync` ("every operation passed here is one statement") is then false.
+- **Recommendation:** Throw `ArgumentOutOfRangeException` when `records.Count > OutboxLimits.MaxEnqueueBatchSize`, and drop
+  the loop.
+- **Status:** Open
+
+#### MY-15 (Info): server-side statement logs contain message payloads
+
+- **File:** `src/DbRelay.MySql/Internal/MySqlOutboxStore.cs:97-117` (MySqlConnector substitutes parameters on the client)
+- **Details:**
+  - The server receives the INSERT with payloads, headers and correlation IDs inlined as literals.
+  - With the general log, the slow query log (a 1,000-row insert can exceed `long_query_time`), audit plugins, or
+    `performance_schema` statement history (truncated to `performance_schema_max_sql_text_length`, 1,024 by default), payload
+    bytes land in server logs.
+  - DbRelay itself logs nothing (invariant 9 holds). This is a deployment note, because operators of other providers expect
+    bind values to stay out of statement text.
+- **Recommendation:** Document it in `docs/mysql.md`. Payload confidentiality needs the server's logs to be scoped accordingly.
+- **Status:** Open
+
+#### MY-16 (Info): test gaps specific to MySQL and MariaDB
+
+- **File:** `tests/DbRelay.MySql.Tests/*`
+- **Gaps:**
+  - There is no EXPLAIN pin for the PK IN-list and PK-equality statements:
+    - claim step 3 and step 4;
+    - lock-for-batch and the batch update;
+    - the guarded single-row updates;
+    - `SelectById`.
+
+    If an `UNHEX` coercion ever stopped them using `PRIMARY`, a REPEATABLE READ guarded update would scan and lock the whole
+    table.
+  - No test shows the ADR's central isolation claim. For example: hold a claim or cleanup transaction open through a test seam
+    (as Oracle's `ClaimTestPause`), and insert from a REPEATABLE READ producer with `innodb_lock_wait_timeout=1`. The insert
+    must not wait.
+  - There is no `max_allowed_packet` test (MY-02), and nothing pins the session isolation (MY-04).
+  - The connection-option matrix covers only `GuidFormat`. It should also cover `UseAffectedRows=true`,
+    `ConnectionReset=false`, `IgnoreCommandTransaction=true` and `DateTimeKind=Utc`/`Local`.
+  - Cancellation is tested on DbRelay's own connection only, not on the caller's insert path. The Oracle fix (OR-09) covers
+    both.
+  - `Concurrent_claims_batches_stale_acknowledgements_and_cleanup_never_deadlock` asserts `DeadlockRetries == 0` (`:604`).
+    - A batch locks rows in PK order while cleanup locks them in `cleanup_at` order. A stale batch holding two or more
+      delivered rows that cleanup is deleting can therefore form a legitimate, retried, harmless cycle.
+    - That makes the assertion a potential source of flakiness rather than a correctness check.
+    - Consider asserting "no errors", and logging the retry count or bounding it.
+- **Recommendation:** Add the plan pins and the producer-not-blocked test first. Both are cheap and guard the ADR's core claims.
+- **Status:** Open
+
+### Commands run in this review
+
+| Command | Purpose | Result |
+|---|---|---|
+| `git diff --stat oracle-provider...mysql-provider`; `git log --oneline oracle-provider..mysql-provider`; `git diff --stat 77f9a55..HEAD` | Scope, and the commits that landed during the review | 19 files at `77f9a55`; later commits touch the soak harness only |
+| `dotnet build tests/DbRelay.MySql.Tests/DbRelay.MySql.Tests.csproj -c Release` | Build the provider and tests on all target frameworks | Succeeded, 0 warnings, 0 errors |
+| `dotnet test --project tests/DbRelay.MySql.Tests -c Release -f net10.0 --no-build` (no `DBRELAY_TEST_MYSQL`) | Non-database tests | 26 passed, 62 skipped, 0 failed (88 total) |
+| `dotnet format <project> --verify-no-changes` (provider and tests) | Formatting | Exit 0 for both |
+| Python string scan of `~/.nuget/packages/mysqlconnector/2.6.2/lib/net8.0/MySqlConnector.dll` | Confirm MySqlConnector's isolation SQL and error texts (MY-02, MY-04, MY-10) | `set session transaction isolation level`; "Error submitting {0}MB packet; ensure 'max_allowed_packet' ..."; "This MySqlConnection is already in use"; "... not the connection's active transaction; see https://mysqlconnector.net/trans" |
+| Python replica of `MySqlOutboxSql.BuildInsert` | Size of the insert-text cache (MY-03) | 271,872 characters for 1,000 rows; 135.6 M characters (about 259 MiB of UTF-16) for all sizes from 1 to 1,000 |
+
+MySQL and MariaDB database tests: **not run here (skipped: no server available)**.
+
+### Verdict
+
+**No Critical or High findings.** The invariants hold:
+- caller resources are untouched;
+- the insert uses exactly the caller's pair;
+- no transaction spans a handler;
+- the single-row transitions are token-guarded, and the batch path is token-guarded through locks;
+- only the database clock is used;
+- attempts are counted at claim time.
+
+The claim and batch designs are race-free on InnoDB, and the READ COMMITTED choice is correct for producer concurrency.
+
+**Three Medium findings to fix before the package is released:**
+- MY-01: payload lengths read through InnoDB LOB fetches. This is a schema change, so it is cheapest before v1 ships.
+- MY-02: an oversized enqueue kills the caller's connection, and the guide is missing.
+- MY-03: up to about 259 MiB of cached insert texts.
+
+MY-06 and MY-12 are small hardening changes worth making at the same time.
+
+## MySQL provider review: resolution log (principal architect, 2026-11-27)
+
+| ID | Severity | Resolution |
+|---|---|---|
+| MY-01 | Medium | **Fixed.** `payload_size BIGINT AS (OCTET_LENGTH(payload)) STORED`; the claim reads it instead of the payloads. Test: `Payload_size_is_stored_at_insert`. |
+| MY-02 | Medium | **Fixed.** A call estimated at 1 MiB or more is checked against the server's `max_allowed_packet` (read on the connection, cached per server for 5 minutes) and rejected before sending. The estimate is conservative: 2 bytes per payload byte, 4 per character. Test: `A_call_larger_than_max_allowed_packet_is_rejected_and_the_callers_transaction_survives`. The guide (`docs/mysql.md`) documents it. |
+| MY-03 | Medium | **Fixed.** Insert texts are cached only up to 64 rows. |
+| MY-04 | Low | **Fixed.** DbRelay's transactions are begun with `SET TRANSACTION ISOLATION LEVEL READ COMMITTED; START TRANSACTION`, without MySqlConnector's `BeginTransaction`, which sets the session isolation level (confirmed in the 2.6.2 binary). They end with `COMMIT`, or `ROLLBACK` on any failure. Test: `DbRelay_transactions_leave_a_pooled_sessions_isolation_level_unchanged` (one pooled connection, `ConnectionReset=false`: still REPEATABLE-READ afterwards, and no open transaction). |
+| MY-05 | Low | **Fixed.** `@@log_bin` and `@@binlog_format` are read once per connection source; with a statement-based log, the session default is kept. Not tested in CI, because the containers use row-based logging. |
+| MY-06 | Low | **Fixed.** The batch UPDATE is guarded by `(id, lock_token) IN (...)`, and its row count must equal the locked matches, or the transaction rolls back. Test: `Claims_and_acknowledgements_work_with_either_affected_rows_setting`. |
+| MY-07 | Low | **Fixed.** With no `Schema`, an insert on a connection whose current database differs from DbRelay's is rejected with guidance. Test: `An_unqualified_outbox_rejects_a_connection_to_another_database`. |
+| MY-08 | Low | **Fixed.** `EnsureCreatedAsync` and the health check verify the three indexes and all 23 columns. Tests: `EnsureCreated_and_the_health_check_reject_a_table_of_the_wrong_shape` and `The_health_check_fails_while_an_index_is_missing`. |
+| MY-09 | Low | **Fixed.** The CHECK constraint is unnamed. Test: `The_table_can_be_created_again_after_the_old_one_is_renamed_aside`. |
+| MY-10 | Low | **Fixed.** The guidance is given only for MySqlConnector's missing-transaction error; other `InvalidOperationException`s pass through unchanged. |
+| MY-11 | Low | **Fixed.** Error 1020 is retried; CI adds MariaDB 11.8 and MySQL 9. |
+| MY-12 | Low | **Fixed.** `FORCE INDEX (ix_claim)` on the claim. A missing index fails loudly, and the health check reports it (MY-08). |
+| MY-13 | Info | **Fixed.** `docs/mysql.md`, ADR 0006 ("Review follow-ups"), CONTRIBUTING and the tracker. |
+| MY-14 | Info | **Fixed.** At most 1,000 records per insert at the storage interface. Test: `The_storage_interface_rejects_more_than_the_enqueue_limit_in_one_call`. The Oracle provider gets the same limit. |
+| MY-15 | Info | **Documented.** MySqlConnector sends values in the statement text, so a server's general or slow query log can contain payloads (`docs/mysql.md`). DbRelay's own logging never includes them (invariant 9). |
+| MY-16 | Info | **Fixed.** New tests: producers inserting while a claim holds its locks; the session isolation level afterwards; oversized calls; the other database; a wrongly shaped table; a missing index; re-creation after a rename; `UseAffectedRows` on and off; primary-key plans for every by-ID statement. The `DeadlockRetries == 0` assertion stays (never weakened); it passed on every engine in CI. |

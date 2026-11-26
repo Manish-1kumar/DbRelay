@@ -74,13 +74,29 @@ The provider test `Claim_cleanup_dead_letter_and_statistics_plans_use_the_genera
   active transaction on every command. The error says to pass it.
 - **`EnqueueManyAsync` is always one multi-row `INSERT`,** so it is all-or-nothing on its own, and DbRelay never begins a
   transaction on your connection.
-- **Large calls must fit in `max_allowed_packet`.** One enqueue call is one packet. The default is 64 MiB on MySQL 8 and 16 MiB
-  on MariaDB. Raise it if you enqueue many large messages in one call.
+- **Large calls must fit in `max_allowed_packet`.** One enqueue call is one packet, and the server closes a connection that
+  sends a bigger one.
+  - The default limit is 64 MiB on MySQL 8 and 16 MiB on MariaDB.
+  - A call that could come close is checked against the server's limit **before** it is sent. It is rejected with an
+    explanation, and your connection and transaction stay intact.
+  - The check is conservative (it counts every payload byte twice), so split the work into several calls, or raise the limit.
+- **With no `Schema` configured, enqueue on a connection to DbRelay's database.** An unqualified table resolves to the
+  connection's current database. If yours differs from the one in DbRelay's connection string, the enqueue is rejected,
+  rather than storing messages the dispatcher never sees.
 - **Isolation:** DbRelay's own claims, batched acknowledgements, cleanup and bulk requeue run in short `READ COMMITTED`
-  transactions. Under the default, `REPEATABLE READ`, their range scans would take gap locks that could block your inserts.
-  Your own transactions are not affected.
-- **Claims** use `SELECT ... FOR UPDATE SKIP LOCKED`, so concurrent dispatchers never wait for each other or claim the same
-  message.
+  transactions.
+  - Under the default, `REPEATABLE READ`, their range scans would take gap locks that could block your inserts.
+  - DbRelay begins these transactions with `SET TRANSACTION`, which applies to one transaction only. So a pooled connection you
+    share keeps its own isolation level, even with `ConnectionReset=false`.
+  - Your own transactions are not affected.
+  - With a **statement-based binary log** (`binlog_format=STATEMENT`), InnoDB rejects writes under `READ COMMITTED`. DbRelay
+    detects this and uses your server's default isolation instead. Row-based and mixed logging, the defaults, are unaffected.
+- **Claims** use `SELECT ... FOR UPDATE SKIP LOCKED`, forced onto the claim index so they never sort and lock every due row.
+  Concurrent dispatchers never wait for each other or claim the same message.
+- **The health check verifies the table's shape:** that it answers, and has its three indexes and every column the provider
+  uses. `EnsureCreatedAsync` runs the same check, because `CREATE TABLE IF NOT EXISTS` accepts an existing table of any shape.
+- **Server query logs can contain values.** MySqlConnector sends parameter values in the statement text. If the server's
+  general log or slow query log is on, payloads and headers can appear there. DbRelay itself never logs them.
 - **Times** are `DATETIME(6)` in UTC, from the database clock (`UTC_TIMESTAMP(6)`).
 - **Empty strings stay empty** (unlike Oracle).
 

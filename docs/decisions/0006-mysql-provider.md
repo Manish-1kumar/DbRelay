@@ -42,9 +42,10 @@ The API mirrors the other providers; nothing new is added to the core packages.
 |---|---|---|
 | `id`, `lock_token` | `BINARY(16)` | Written with `UNHEX(@hex)` and read with `HEX(...)`, so the stored bytes never depend on the caller's `GuidFormat` connection option |
 | `payload` | `LONGBLOB` | |
+| `payload_size` | `BIGINT`, stored generated column (`OCTET_LENGTH(payload)`) | Computed once at insert, so a claim applies its budget without reading payloads (MY-01) |
 | `headers`, `last_error` | `MEDIUMTEXT` | |
 | Text columns | `VARCHAR(n)` | Same lengths as SQL Server |
-| `status` | `TINYINT` | With a `CHECK` (enforced from MySQL 8.0.16 and MariaDB 10.2) |
+| `status` | `TINYINT` | With an unnamed `CHECK` (enforced from MySQL 8.0.16 and MariaDB 10.2). Unnamed, because MySQL renames generated constraint names with the table, so re-creating it after a `RENAME TABLE` cannot collide (MY-09) |
 | `attempt_count` | `INT` | |
 | Times | `DATETIME(6)` | UTC from `UTC_TIMESTAMP(6)`, the database clock (invariant 5) |
 
@@ -65,8 +66,9 @@ the same index range, and deadlock with them. READ COMMITTED locks only the rows
 
 ### Claim
 One short transaction on a DbRelay connection, with no handler running (invariant 3):
-1. `SELECT ... FOR UPDATE SKIP LOCKED` on `claim_at <= now` ordered by `claim_at`, `LIMIT` the batch size, returning each
-   payload's length.
+1. `SELECT ... FORCE INDEX (ix_claim) ... FOR UPDATE SKIP LOCKED` on `claim_at <= now` ordered by `claim_at`, `LIMIT` the
+   batch size, returning each `payload_size`. Forcing the index keeps the claim a range scan in order (MY-12): a sort would lock
+   every due row for the whole claim.
 2. The payload budget (ADR 0004) is applied in the store, and the first row is always taken.
 3. `UPDATE ... WHERE id IN (...) AND status IN (0, 1) AND available_at <= now` leases the rows and counts the attempt
    (invariant 10). The re-check matches the Oracle provider's (OR-01).
@@ -100,3 +102,22 @@ One short transaction on a DbRelay connection, with no handler running (invarian
   MariaDB. The provider guide must say so.
 - **The batched-acknowledgement and claim paths take two to three round trips** instead of one, inside short transactions.
 - **Aurora and RDS** are expected to behave like the engine versions they run, but stay listed as untested until verified.
+
+## Review follow-ups (2026-11-27)
+
+The independent review (CODE_REVIEW_REPORT.md, "MySQL provider review (ADR 0006)") found no Critical or High issues. The design
+above includes its fixes. These also change the provider's behaviour:
+
+- **DbRelay's own transactions are begun with SQL,** with `SET TRANSACTION ISOLATION LEVEL READ COMMITTED; START TRANSACTION`,
+  and ended with `COMMIT` or `ROLLBACK` (MY-04).
+  - MySqlConnector's `BeginTransaction` sets the isolation level for the whole session, which would leave a pooled connection at
+    READ COMMITTED for the application.
+  - With a statement-based binary log, the session default is kept, because READ COMMITTED would fail with error 1665 (MY-05).
+- **Calls that could exceed `max_allowed_packet` are rejected before they are sent** (MY-02). The server would otherwise
+  close the caller's connection.
+- **With no `Schema`,** an insert on a connection to a different current database than DbRelay's is rejected (MY-07).
+- **`EnsureCreatedAsync` and the health check verify the table's shape:** its indexes and columns (MY-08).
+- **Batched acknowledgements** are guarded by `(id, lock_token)` pairs in SQL, and must change exactly the locked rows (MY-06).
+- **Retries:** error 1020 is retried (MariaDB 11.8+ snapshot isolation, MY-11).
+- **The storage interface accepts at most 1,000 records per insert** (MY-14).
+- **Cached insert texts** are limited to 64 rows (MY-03).
