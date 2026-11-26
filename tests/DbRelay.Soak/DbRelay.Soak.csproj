@@ -21,6 +21,7 @@
     <ProjectReference Include="..\..\src\DbRelay.PostgreSql\DbRelay.PostgreSql.csproj" />
     <ProjectReference Include="..\..\src\DbRelay.SqlServer\DbRelay.SqlServer.csproj" />
     <ProjectReference Include="..\..\src\DbRelay.Oracle\DbRelay.Oracle.csproj" />
+    <ProjectReference Include="..\..\src\DbRelay.MySql\DbRelay.MySql.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -337,8 +337,8 @@ public static class Coordinator
         var sunkButNotDelivered = await Count($"SELECT COUNT(DISTINCT s.message_id) FROM {sink} s JOIN {outbox} m ON m.id = s.message_id WHERE m.status <> 2");
         var poisonSunk = await Count($"SELECT COUNT(DISTINCT s.message_id) FROM {sink} s JOIN {orders} o ON o.message_id = s.message_id WHERE o.poison = {db.P("yes")}", new { yes });
 
-        var outboxIds = await db.QueryIdsAsync(c, $"SELECT id FROM {outbox}");
-        var sinkIds = await db.QueryIdsAsync(c, $"SELECT DISTINCT message_id FROM {sink}");
+        var outboxIds = await db.QueryIdsAsync(c, $"SELECT {db.IdExpr("id")} FROM {outbox}");
+        var sinkIds = await db.QueryIdsAsync(c, $"SELECT DISTINCT {db.IdExpr("message_id")} FROM {sink}");
         var rolledBackInOutbox = rolledBack.Count(outboxIds.Contains);
         var rolledBackDelivered = rolledBack.Count(sinkIds.Contains);
 
