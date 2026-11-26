@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Oracle provider `DbRelay.Oracle`** (ADR 0005), in the repository and tested in CI on Oracle 23ai Free and 21c XE, but **not on
+  NuGet yet**. `UseOracle(connectionString, ...)`, `UseOracle(Func<IServiceProvider, OracleConnection>, ...)` and
+  `OracleOutboxOptions`. See `docs/oracle.md`.
+- The storage conformance suite has two optional hooks for providers, `PrepareSchemaAsync` and `InsertOrderAsync`.
+
 ## [0.2.0] - 2026-11-26
 
 The SQL Server package. No breaking changes: 0.1.0 code compiles and runs unchanged.

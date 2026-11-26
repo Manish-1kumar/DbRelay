@@ -61,11 +61,19 @@ The API mirrors the other providers; nothing new is added to the core packages.
 
 ### Partial indexes
 Oracle has none. Function-based indexes give the same effect, because a key that is entirely NULL is not indexed.
-- **Claim index:** `CASE WHEN STATUS IN (0, 1) THEN AVAILABLE_AT END`.
+- **Claim index:** `CASE WHEN STATUS IN (0, 1) THEN AVAILABLE_AT END`, then the same form on `STATUS`.
 - **Cleanup index:** the same form on `DELIVERED_AT` for status 2.
 - **Dead-letter index:** the same form on `DEAD_LETTERED_AT` for status 3.
-- **Queries must repeat the exact same expression** for the optimizer to use the index. Tests pin the plans, as T-03 does
-  for PostgreSQL.
+- **Queries repeat the exact same expression,** and the claim, cleanup and dead-letter cursors and the statistics counts are
+  **hinted** to their index.
+  - **Why hints:** CI showed the optimizer choosing a full scan plus sort for the claim on a 20,000-row table.
+  - **Unlike SQL Server (ADR 0002),** Oracle ignores a hint whose index is missing, so a dropped index slows these statements
+    but cannot break them.
+- **Pending and processing counts** come from one fast full scan of the claim index: its row count, and the sum of its 0/1
+  status key. Comparing the status key to a constant does not work, because the optimizer simplifies
+  `CASE ... END = 0` to `STATUS = 0` and then scans the table.
+- **The plan test** (`Claim_cleanup_dead_letter_and_statistics_plans_use_the_function_based_indexes`) checks the exact cursor
+  queries on 20,000 rows: each uses its index, none scans the table, and the claim does not sort.
 
 ### Claim
 `FOR UPDATE ... SKIP LOCKED` cannot be combined with `FETCH FIRST` or `ROWNUM` without returning too few rows, so the claim
@@ -74,16 +82,24 @@ is **one anonymous PL/SQL block**, autocommitted as one statement:
    locked as they are fetched.
 2. It stops at the batch size, or at the payload budget (ADR 0004): `DBMS_LOB.GETLENGTH`, with the first row always taken.
 3. It updates each fetched row: lock token, worker, attempt + 1 (invariant 10), and a lease ending at `now + lease`.
-4. It returns the claimed IDs in claim order and a cursor over the claimed rows.
+4. It returns the claimed IDs in claim order, as one string of 32 hex digits per ID (32,000 characters for the maximum batch of
+   1,000, within `VARCHAR2(32767)`). It also returns a `REF CURSOR` over the claimed rows, found through the claim index:
+   every claimed row has the same new `AVAILABLE_AT` and the claim's lock token. This avoids PL/SQL array binds, whose type
+   rules differ between Oracle and driver versions.
 
 ### Guarded updates, acknowledgements and inserts
 - **State changes after a claim:** single statements guarded by `WHERE ID = :id AND LOCK_TOKEN = :token` (invariant 4).
 - **Batched acknowledgements (ADR 0003):**
-  - one PL/SQL `FORALL` over bound arrays;
+  - one PL/SQL `FORALL` block; the IDs and tokens arrive as two hex strings;
   - `SQL%BULK_ROWCOUNT` reports which items changed;
-  - items are sorted by their stored byte order (BA-07).
-- **Inserts:** always on the caller's connection and transaction (invariants 1 and 2). Several rows go in **one statement**,
-  so they are stored all-or-nothing without DbRelay ever beginning a transaction on the caller's connection.
+  - items are sorted by their stored `RAW(16)` byte order (BA-07).
+- **Inserts:** always on the caller's connection and transaction (invariants 1 and 2).
+  - Up to 90 rows go in **one `INSERT ALL` statement**, which is all-or-nothing on its own. Oracle allows at most 999
+    columns across the clauses, and each row sets 10.
+  - More rows need several statements. With a caller transaction they run in it.
+  - Without one, DbRelay begins a transaction and commits it, as the SQL Server provider does (K9). If the connection
+    already has a transaction the caller did not pass, ODP.NET refuses a second one, and the statements run in the
+    existing transaction instead.
 - **`transaction: null` on a connection that has a transaction:** ODP.NET runs the command in that transaction. This is
   the same documented behaviour as PostgreSQL, and a test pins it.
 
@@ -91,15 +107,21 @@ is **one anonymous PL/SQL block**, autocommitted as one statement:
 - **Before 23ai there is no `IF NOT EXISTS`,** so each object is created in a PL/SQL block that ignores ORA-00955 ("name
   already used"). The script stays idempotent and non-destructive.
 - **Oracle DDL commits implicitly,** so `EnsureCreatedAsync` runs on DbRelay's own connection, never the caller's.
-- **Concurrent instances creating the schema** are serialized with `DBMS_LOCK.REQUEST`. That needs `EXECUTE ON DBMS_LOCK`;
-  without it, creation falls back to tolerating ORA-00955.
+- **Concurrent instances creating the schema:** "already exists" errors are ignored, and `DDL_LOCK_TIMEOUT` makes DDL wait
+  for another instance's lock. On 21c XE, four instances still hit ORA-04020 (library cache deadlock), so
+  `EnsureCreatedAsync` retries the whole idempotent script on ORA-04020, ORA-04021 and ORA-00054. This needs no extra
+  grants, unlike `DBMS_LOCK`.
 
-### To be verified empirically before release
-These go into the provider tests:
-- array binding of `BLOB` values;
-- the atomicity of the multi-row insert when one row fails;
-- the claim block under 8 concurrent claimers, with no row claimed twice;
-- the index plans of the claim, cleanup and statistics queries.
+### Verified in CI
+CI run 45872607007, on Oracle 23ai Free across all 4 target frameworks and on 21c XE: 82/82 tests each, 0 skipped. The
+tests cover:
+- the full storage conformance suite, including 8 concurrent claimers with no message claimed twice and the 250-message
+  atomic `EnqueueMany`;
+- all-or-nothing inserts with a primary-key violation part-way, for one statement and for several;
+- the null-transaction behaviour;
+- an empty payload;
+- concurrent schema creation;
+- the plan test above.
 
 ## Consequences
 - **Two more packages** to release and maintain, with a CI job per database version.
