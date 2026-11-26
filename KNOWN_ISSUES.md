@@ -19,3 +19,5 @@
 | K15 | Per-message acknowledgement round trip was the measured throughput bottleneck | Was a ~3.5–3.9k msg/s ceiling on the benchmark laptop | **Resolved** by batched acknowledgements (up to about 2.8× under load; `docs/benchmarks.md` §3). Residual: a single SQL Server dispatcher at concurrency 8 measured a 5–8% lower median (within noise) |
 | K16 | Oracle provider: tested on Oracle 23ai Free and 21c XE only | 19c (the oldest supported version) has no free container image and is untested; Autonomous Database is untested | Open |
 | K17 | Oracle stores empty strings as NULL | An empty `Destination`, `CorrelationId` or `CausationId` reads back as `null` on Oracle (other providers keep `""`) | By design; documented in `docs/oracle.md` |
+| K18 | MySQL provider: tested on MySQL 8.0 and 8.4 and MariaDB 10.11 and 11.4 in containers only | Amazon RDS for MySQL and Aurora MySQL 3 run these engines but are untested | Open |
+| K19 | MySQL: one enqueue call is one packet | A call larger than the server's `max_allowed_packet` (64 MiB on MySQL 8, 16 MiB on MariaDB) fails; documented in `docs/mysql.md` | By design; documented |

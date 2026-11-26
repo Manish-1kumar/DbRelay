@@ -414,6 +414,7 @@ want a small dependency whose failure behaviour is documented and tested.
 | [PostgreSQL](docs/postgres.md) | Schema, indexes, permissions, autovacuum, migration tools |
 | [SQL Server](docs/sqlserver.md) | RCSI, index hints, `QUOTED_IDENTIFIER`, `sqlcmd -I` |
 | [Oracle](docs/oracle.md) (in development) | Schemas are users, function-based indexes, empty strings |
+| [MySQL and MariaDB](docs/mysql.md) (in development) | Schemas are databases, generated-column indexes, `max_allowed_packet` |
 | [Reliability](docs/reliability.md) | Every guarantee and the test that proves it |
 | [Troubleshooting](docs/troubleshooting.md) | Stuck messages, lost leases, dead letters, health states, requeue |
 | [Migrating from a hand-rolled outbox](docs/migrating-from-hand-rolled-outbox.md) | The classic bugs and how DbRelay handles them |

@@ -12,6 +12,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Oracle provider `DbRelay.Oracle`** (ADR 0005), in the repository and tested in CI on Oracle 23ai Free and 21c XE, but **not on
   NuGet yet**. `UseOracle(connectionString, ...)`, `UseOracle(Func<IServiceProvider, OracleConnection>, ...)` and
   `OracleOutboxOptions`. See `docs/oracle.md`.
+- **MySQL and MariaDB provider `DbRelay.MySql`** (ADR 0006), in the repository and tested in CI on MySQL 8.0 and 8.4 and MariaDB 10.11
+  and 11.4, but **not on NuGet yet**. `UseMySql(connectionString, ...)`, `UseMySql(Func<IServiceProvider, MySqlConnection>, ...)`
+  and `MySqlOutboxOptions`. See `docs/mysql.md`.
 - The storage conformance suite has two optional hooks for providers, `PrepareSchemaAsync` and `InsertOrderAsync`.
 
 ## [0.2.0] - 2026-11-26

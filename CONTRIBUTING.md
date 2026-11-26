@@ -44,6 +44,7 @@ Provider, conformance and integration tests run against **real databases**. Each
 | `DBRELAY_TEST_POSTGRES` | `Host=localhost;Username=postgres;Password=...;Database=dbrelay_tests` |
 | `DBRELAY_TEST_SQLSERVER` | `Server=.\SQLEXPRESS;Integrated Security=true;TrustServerCertificate=true;Database=dbrelay_tests` |
 | `DBRELAY_TEST_ORACLE` | `User Id=system;Password=...;Data Source=localhost:1521/FREEPDB1` (a user that can create and drop users: each test gets its own schema, which in Oracle is a user) |
+| `DBRELAY_TEST_MYSQL` | `Server=127.0.0.1;Port=3306;User ID=root;Password=...;SslMode=Preferred;AllowPublicKeyRetrieval=true` (no database: each test creates its own schema, which in MySQL is a database) |
 
 Tests create their own uniquely named schemas (for example `t_<hex>` and `it_<hex>`) and drop them afterwards, so they can share a
 database. The SQL Server suite runs the conformance tests twice, with `READ_COMMITTED_SNAPSHOT` off and on. It uses a second
@@ -86,6 +87,7 @@ pauses. An open SSMS, Query editor or VS Code connection keeps it online. Do not
 | `tests/DbRelay.PostgreSql.Tests` | PostgreSQL provider tests plus the conformance suite |
 | `tests/DbRelay.SqlServer.Tests` | SQL Server provider tests plus the conformance suite (RCSI off and on) |
 | `tests/DbRelay.Oracle.Tests` | Oracle provider tests plus the conformance suite |
+| `tests/DbRelay.MySql.Tests` | MySQL and MariaDB provider tests plus the conformance suite |
 | `tests/DbRelay.IntegrationTests` | Real hosts and real child processes against PostgreSQL: crash recovery, stale workers, database interruption, shutdown, retry schedule, security |
 | `tests/DbRelay.CrashWorker` | The child process the crash tests start and kill (not a test project) |
 
