@@ -36,6 +36,7 @@ drops it afterwards (pass `--keep` to keep it).
 | 2026-11-22 | SQL Server 2022 Express (0.2 backlog) | 30 min | 67,544 | 30 / 13 | 514 | 0 | 0 | 861 ms | **PASS 9/9** | [report](2026-11-22-sqlserver-30min-0.2-backlog.md) |
 | 2026-11-22 | PostgreSQL 17.5 (0.2 backlog) | 30 min | 71,522 | 29 / 15 | 831 | 0 | 0 | 1,397 ms | **PASS 9/9** | [report](2026-11-22-postgresql-30min-0.2-backlog.md) |
 | 2026-11-27 | Oracle 23ai Free (GitHub Actions) | 5 h 20 min | 38,797 (+9,909 rolled back) | 337 / 121 | 5,130 | 0 | 0 | 349 ms | **PASS 9/9** | [report](2026-11-27-oracle-320min.md) |
+| 2026-11-27 | MySQL 8.4 (GitHub Actions, before the MySQL review fixes) | 5 h 20 min | 39,218 (+9,637 rolled back) | 311 / 147 | 2,406 | 0 | 1 | 341 ms | **PASS 9/9** | [report](2026-11-27-mysql-320min-pre-review.md) |
 
 The "0.2 backlog" runs use the code after these changes:
 - the payload budgets (CR-18);
