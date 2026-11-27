@@ -1,13 +1,8 @@
 name: Soak (MySQL)
 
 # On-demand soak/chaos run of tests/DbRelay.Soak against MySQL 8.4 LTS. GitHub-hosted jobs are limited to 6 hours, so the default
-# load phase is 320 minutes, leaving time for the drain and verification. Until this workflow is on the default branch, a push
-# that changes .github/soak-trigger-mysql on the mysql-provider branch starts it with that file's settings
-# (for example "minutes=320 rate=1.7 workers=3").
+# load phase is 320 minutes, leaving time for the drain and verification.
 on:
-  push:
-    branches: [mysql-provider]
-    paths: [".github/soak-trigger-mysql"]
   workflow_dispatch:
     inputs:
       minutes:
@@ -55,13 +50,6 @@ jobs:
         id: settings
         run: |
           minutes="${{ inputs.minutes }}"; rate="${{ inputs.rate }}"; workers="${{ inputs.workers }}"
-          if [ -f .github/soak-trigger-mysql ] && [ "${{ github.event_name }}" = "push" ]; then
-            for pair in $(cat .github/soak-trigger-mysql); do
-              case "$pair" in
-                minutes=*) minutes="${pair#minutes=}" ;; rate=*) rate="${pair#rate=}" ;; workers=*) workers="${pair#workers=}" ;;
-              esac
-            done
-          fi
           echo "minutes=${minutes:-320}" >> "$GITHUB_OUTPUT"; echo "rate=${rate:-1.7}" >> "$GITHUB_OUTPUT"; echo "workers=${workers:-3}" >> "$GITHUB_OUTPUT"
           echo "Soak: ${minutes:-320} minutes, rate ${rate:-1.7}, ${workers:-3} workers"
       - name: Build the soak harness

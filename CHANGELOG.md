@@ -7,15 +7,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-27
+
+Two new providers: Oracle, and MySQL and MariaDB. No breaking changes: 0.2.0 code compiles and runs unchanged (checked against
+the published 0.2.0 packages).
+
 ### Added
 
-- **Oracle provider `DbRelay.Oracle`** (ADR 0005), in the repository and tested in CI on Oracle 23ai Free and 21c XE, but **not on
-  NuGet yet**. `UseOracle(connectionString, ...)`, `UseOracle(Func<IServiceProvider, OracleConnection>, ...)` and
-  `OracleOutboxOptions`. See `docs/oracle.md`.
-- **MySQL and MariaDB provider `DbRelay.MySql`** (ADR 0006), in the repository and tested in CI on MySQL 8.0 and 8.4 and MariaDB 10.11
-  and 11.4, but **not on NuGet yet**. `UseMySql(connectionString, ...)`, `UseMySql(Func<IServiceProvider, MySqlConnection>, ...)`
-  and `MySqlOutboxOptions`. See `docs/mysql.md`.
-- The storage conformance suite has two optional hooks for providers, `PrepareSchemaAsync` and `InsertOrderAsync`.
+- **`DbRelay.Oracle`** (ADR 0005), for Oracle Database 19c and later. Tested on Oracle 23ai Free and 21c XE; 19c is untested
+  (K16).
+  - API: `UseOracle(connectionString, ...)`, `UseOracle(Func<IServiceProvider, OracleConnection>, ...)` and
+    `OracleOutboxOptions`.
+  - Built on ODP.NET Core (`Oracle.ManagedDataAccess.Core`), which is under Oracle's license.
+  - See `docs/oracle.md`.
+- **`DbRelay.MySql`** (ADR 0006), for MySQL 8.0 and later (including Amazon RDS and Aurora MySQL 3) and MariaDB 10.11 and
+  later. Tested on MySQL 8.0, 8.4 and 9.7 and on MariaDB 10.11, 11.4 and 11.8; RDS and Aurora are untested (K18).
+  - API: `UseMySql(connectionString, ...)`, `UseMySql(Func<IServiceProvider, MySqlConnection>, ...)` and
+    `MySqlOutboxOptions`.
+  - Built on MySqlConnector (MIT).
+  - See `docs/mysql.md`.
+- **Both providers passed an independent review** (no Critical or High findings; every finding fixed, see
+  CODE_REVIEW_REPORT.md) and a 5 h 20 min soak with worker kills and dropped sessions: 0 lost messages (`docs/soak/`).
+- **A 6-hour PostgreSQL soak on the 0.2.0 code also passed.**
+- **On-demand GitHub Actions soak workflows** for Oracle and MySQL (`soak.yml`, `soak-mysql.yml`).
+- **The storage conformance suite has three optional hooks for providers:** `PrepareSchemaAsync`, `InsertOrderAsync` and
+  `SchemaNameInScript`.
+
+### Changed
+
+- **Package validation** now compares `DbRelay.Abstractions`, `DbRelay`, `DbRelay.PostgreSql` and `DbRelay.SqlServer` with their
+  0.2.0 packages.
 
 ## [0.2.0] - 2026-11-26
 
@@ -121,6 +142,7 @@ First release.
 
 See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the Limitations section of the [README](README.md#limitations).
 
-[Unreleased]: https://github.com/Manish-1kumar/DbRelay/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Manish-1kumar/DbRelay/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Manish-1kumar/DbRelay/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Manish-1kumar/DbRelay/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Manish-1kumar/DbRelay/releases/tag/v0.1.0

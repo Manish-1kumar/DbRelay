@@ -1,8 +1,10 @@
 # MySQL and MariaDB guide
 
-> **Status: in development; not on NuGet yet.** The provider is in the repository (`src/DbRelay.MySql`) and is tested in CI,
-> but it is not packed until its release. Until then, reference the project. The design is in
-> [ADR 0006](decisions/0006-mysql-provider.md).
+```shell
+dotnet add package DbRelay.MySql --version 0.3.0
+```
+
+The design is in [ADR 0006](decisions/0006-mysql-provider.md).
 
 **Supported:**
 - MySQL 8.0 and later, including Amazon RDS for MySQL 8.x and Aurora MySQL 3;

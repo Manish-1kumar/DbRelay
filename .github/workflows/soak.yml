@@ -4,11 +4,6 @@ name: Soak (Oracle)
 # so the default load phase is 320 minutes, leaving time for the database to start and for the drain and verification.
 # PostgreSQL and SQL Server soaks run on a developer machine (docs/soak/README.md).
 on:
-  # Until this workflow is on the default branch, GitHub cannot dispatch it manually. A push that changes .github/soak-trigger on
-  # the oracle-provider branch starts it with that file's settings (for example "minutes=320 rate=1.7 workers=3").
-  push:
-    branches: [oracle-provider]
-    paths: [".github/soak-trigger"]
   workflow_dispatch:
     inputs:
       minutes:
@@ -56,13 +51,6 @@ jobs:
         id: settings
         run: |
           minutes="${{ inputs.minutes }}"; rate="${{ inputs.rate }}"; workers="${{ inputs.workers }}"
-          if [ -f .github/soak-trigger ] && [ "${{ github.event_name }}" = "push" ]; then
-            for pair in $(cat .github/soak-trigger); do
-              case "$pair" in
-                minutes=*) minutes="${pair#minutes=}" ;; rate=*) rate="${pair#rate=}" ;; workers=*) workers="${pair#workers=}" ;;
-              esac
-            done
-          fi
           echo "minutes=${minutes:-320}" >> "$GITHUB_OUTPUT"; echo "rate=${rate:-1.7}" >> "$GITHUB_OUTPUT"; echo "workers=${workers:-3}" >> "$GITHUB_OUTPUT"
           echo "Soak: ${minutes:-320} minutes, rate ${rate:-1.7}, ${workers:-3} workers"
       - name: Build the soak harness

@@ -4,11 +4,7 @@
     <RootNamespace>DbRelay.Oracle</RootNamespace>
     <Description>Oracle storage provider for DbRelay (ODP.NET Core): transactional outbox inserts in the caller's OracleTransaction, FOR UPDATE SKIP LOCKED claiming with leases and lock tokens, retention cleanup and explicit, idempotent schema creation. Oracle Database 19c and later.</Description>
     <PackageTags>$(PackageTags);oracle</PackageTags>
-    <!--
-      Not published yet (ADR 0005): it is built and tested in every CI run, but not packed until the owner approves its release, so
-      a release tag cannot publish it by accident. Pack it explicitly with -p:DbRelayPackOracle=true.
-    -->
-    <IsPackable Condition="'$(DbRelayPackOracle)' != 'true'">false</IsPackable>
+    <!-- First published in 0.3.0, so there is no earlier package to validate its API against. -->
   </PropertyGroup>
 
   <ItemGroup>

@@ -1,9 +1,9 @@
 # Project Status
 
-_Last updated: 2026-11-26_
+_Last updated: 2026-11-27_
 
-**Phase:** **0.2.0 released to NuGet** (2026-11-26): `DbRelay.Abstractions`, `DbRelay`, `DbRelay.PostgreSql` and, for the
-first time, `DbRelay.SqlServer`. 0.1.0 was released earlier the same day. Public at https://github.com/Manish-1kumar/DbRelay (since 2026-11-22; private
+**Phase:** **0.3.0 released to NuGet** (2026-11-27): adds `DbRelay.Oracle` and `DbRelay.MySql` (MySQL and MariaDB) to
+`DbRelay.Abstractions`, `DbRelay`, `DbRelay.PostgreSql` and `DbRelay.SqlServer`. 0.1.0 and 0.2.0 were released on 2026-11-26. Public at https://github.com/Manish-1kumar/DbRelay (since 2026-11-22; private
 vulnerability reporting enabled). Open owner items are in RELEASE_CHECKLIST.md.
 
 | Milestone | Status | Notes |

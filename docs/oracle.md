@@ -1,8 +1,10 @@
 # Oracle guide
 
-> **Status: in development; not on NuGet yet.** The provider is in the repository (`src/DbRelay.Oracle`) and is tested in CI,
-> but it is not packed until its release. Until then, reference the project. The design is in
-> [ADR 0005](decisions/0005-oracle-and-mysql-providers.md).
+```shell
+dotnet add package DbRelay.Oracle --version 0.3.0
+```
+
+The design is in [ADR 0005](decisions/0005-oracle-and-mysql-providers.md).
 
 Supported: Oracle Database 19c and later. **Tested:** Oracle Database 23ai Free and 21c Express Edition, in Linux containers in
 CI. 19c is not tested yet, because it has no free container image. Provider: `DbRelay.Oracle`, built on ODP.NET Core

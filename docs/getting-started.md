@@ -15,11 +15,11 @@ apart from the registration call; see [the SQL Server section](#sql-server).
 Add the provider package, which brings in `DbRelay` and `DbRelay.Abstractions`:
 
 ```shell
-dotnet add package DbRelay.PostgreSql --version 0.2.0
+dotnet add package DbRelay.PostgreSql --version 0.3.0
 ```
 
 For SQL Server, add `DbRelay.SqlServer` instead (see [SQL Server](#sql-server)):
-`dotnet add package DbRelay.SqlServer --version 0.2.0`.
+`dotnet add package DbRelay.SqlServer --version 0.3.0`. Oracle (`DbRelay.Oracle`) and MySQL or MariaDB (`DbRelay.MySql`) work the same way; read [oracle.md](oracle.md) or [mysql.md](mysql.md) first.
 
 The samples also use Dapper for business writes. DbRelay itself does not depend on Dapper: it works with any code that holds
 an `NpgsqlTransaction` or `SqlTransaction`.
