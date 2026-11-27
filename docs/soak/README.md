@@ -38,6 +38,7 @@ drops it afterwards (pass `--keep` to keep it).
 | 2026-11-27 | PostgreSQL 17 (0.2.0 code) | 6 h | 37,262 (+9,121 rolled back) | 354 / 147 | 5,659 | 0 | 2 | 1,353 ms | **PASS 9/9** | [report](2026-11-27-postgresql-360min.md) |
 | 2026-11-27 | Oracle 23ai Free (GitHub Actions) | 5 h 20 min | 38,797 (+9,909 rolled back) | 337 / 121 | 5,130 | 0 | 0 | 349 ms | **PASS 9/9** | [report](2026-11-27-oracle-320min.md) |
 | 2026-11-27 | MySQL 8.4 (GitHub Actions, before the MySQL review fixes) | 5 h 20 min | 39,218 (+9,637 rolled back) | 311 / 147 | 2,406 | 0 | 1 | 341 ms | **PASS 9/9** | [report](2026-11-27-mysql-320min-pre-review.md) |
+| 2026-11-27 | MySQL 8.4 (GitHub Actions, reviewed code) | 5 h 20 min | 39,101 (+10,020 rolled back) | 318 / 135 | 2,590 | 0 | 0 | 350 ms | **PASS 9/9** | [report](2026-11-27-mysql-320min.md) |
 
 The "0.2 backlog" runs use the code after these changes:
 - the payload budgets (CR-18);
