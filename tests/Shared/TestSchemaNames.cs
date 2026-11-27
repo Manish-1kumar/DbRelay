@@ -83,6 +83,45 @@ public static partial class TestSchemaNames
         return dropped;
     }
 
+    /// <summary>
+    /// Drops stale Oracle test schemas. In Oracle a schema is a user, and the provider stores names in upper case
+    /// (<c>T_6740B5C1A3F09E27</c>). Best effort: failures (for example a user still connected) are ignored.
+    /// </summary>
+    public static async Task<int> SweepOracleAsync(DbConnection connection)
+    {
+        var stale = await ListStaleAsync(connection, "SELECT USERNAME FROM ALL_USERS WHERE REGEXP_LIKE(USERNAME, '^(T|IT|P)_[0-9A-F]{16}$')");
+        var dropped = 0;
+        foreach (var user in stale)
+        {
+            // The name matched the pattern above, so it contains only letters, digits and an underscore.
+            if (await TryExecuteAsync(connection, $"DROP USER \"{user}\" CASCADE"))
+            {
+                dropped++;
+            }
+        }
+
+        return dropped;
+    }
+
+    /// <summary>
+    /// Drops stale MySQL / MariaDB test schemas. In MySQL a schema is a database. Best effort: failures are ignored.
+    /// </summary>
+    public static async Task<int> SweepMySqlAsync(DbConnection connection)
+    {
+        var stale = await ListStaleAsync(connection, "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME REGEXP '^(t|it|p)_[0-9a-f]{16}$'");
+        var dropped = 0;
+        foreach (var schema in stale)
+        {
+            // The name matched the pattern above, so it contains only letters, digits and an underscore.
+            if (await TryExecuteAsync(connection, $"DROP DATABASE IF EXISTS `{schema}`"))
+            {
+                dropped++;
+            }
+        }
+
+        return dropped;
+    }
+
     private static async Task<List<string>> ListStaleAsync(DbConnection connection, string sql)
     {
         var now = DateTimeOffset.UtcNow;
@@ -93,7 +132,7 @@ public static partial class TestSchemaNames
         while (await reader.ReadAsync())
         {
             var name = reader.GetString(0);
-            if (IsStale(name, now))
+            if (IsStale(name.ToLowerInvariant(), now))
             {
                 names.Add(name);
             }

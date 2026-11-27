@@ -4,8 +4,8 @@
 have, using Dapper or plain ADO.NET. A background dispatcher delivers it to one interface you implement. Every reliability
 guarantee is written down and mapped to a test that runs against real PostgreSQL and SQL Server.
 
-> Status: **0.2.0, released on NuGet** (`DbRelay.Abstractions`, `DbRelay`, `DbRelay.PostgreSql`, `DbRelay.SqlServer`). The
-> API may change before 1.0.
+> Status: **0.3.0, released on NuGet.** Providers: `DbRelay.PostgreSql`, `DbRelay.SqlServer`, `DbRelay.Oracle` and
+> `DbRelay.MySql` (MySQL and MariaDB), each with `DbRelay` and `DbRelay.Abstractions`. The API may change before 1.0.
 
 ## The problem: dual writes
 
@@ -40,7 +40,7 @@ Core integration. It does not make delivery exactly-once: it delivers **at least
 **1. Add the provider package.** It brings in `DbRelay` and `DbRelay.Abstractions`.
 
 ```shell
-dotnet add package DbRelay.PostgreSql --version 0.2.0
+dotnet add package DbRelay.PostgreSql --version 0.3.0
 ```
 
 **2. Register DbRelay, a delivery handler and the health check** (from [`samples/PostgreSql.Sample/Program.cs`](samples/PostgreSql.Sample/Program.cs)):
@@ -121,7 +121,7 @@ Run it with `dotnet run --project samples/PostgreSql.Sample` and `POST /orders`.
 ## SQL Server
 
 ```shell
-dotnet add package DbRelay.SqlServer --version 0.2.0
+dotnet add package DbRelay.SqlServer --version 0.3.0
 ```
 
 The same API, with `UseSqlServer` and a `SqlTransaction` (from [`samples/SqlServer.Sample`](samples/SqlServer.Sample)):
@@ -163,6 +163,17 @@ await transaction.CommitAsync(ct);
 ```
 
 SQL Server specifics (RCSI, index hints, `QUOTED_IDENTIFIER`) are in [docs/sqlserver.md](docs/sqlserver.md).
+
+## Oracle, MySQL and MariaDB
+
+The same API again, with the provider's own connection and transaction types:
+
+| Database | Package | Registration | Guide |
+|---|---|---|---|
+| Oracle 19c+ | `dotnet add package DbRelay.Oracle --version 0.3.0` | `relay.UseOracle(connectionString)` | [docs/oracle.md](docs/oracle.md) |
+| MySQL 8.0+, MariaDB 10.11+ | `dotnet add package DbRelay.MySql --version 0.3.0` | `relay.UseMySql(connectionString)` | [docs/mysql.md](docs/mysql.md) |
+
+Read the provider guide first: on Oracle a schema is a user, on MySQL a schema is a database, and DbRelay never creates either.
 
 ## Transaction ownership rules
 
@@ -369,8 +380,9 @@ the dispatcher is not running, its last polls failed, or it has made no progress
 - **At-least-once only**, with **no ordering** guarantee. Per-key ordering is on the roadmap.
 - **One delivery handler per application.**
 - **Polling.** Latency is bounded by `PollingInterval` (default 1 s). There are no LISTEN/NOTIFY wake-ups yet.
-- **Tested on PostgreSQL 15, 16, 17 and 18 and on SQL Server 2019, 2022 and 2025.** Azure SQL Database is not tested yet
-  ([K7](KNOWN_ISSUES.md)).
+- **Tested on PostgreSQL 15-18, SQL Server 2019, 2022 and 2025, Oracle 21c XE and 23ai Free, MySQL 8.0, 8.4 and 9.7, and MariaDB
+  10.11, 11.4 and 11.8.** Azure SQL Database, Oracle 19c, Amazon RDS and Aurora are not tested yet
+  ([K7, K16, K18](KNOWN_ISSUES.md)).
 - **SQL Server index hints.** DbRelay's statements name its indexes, so they **fail** (rather than slow down) if a DBA drops one
   (ADR 0002).
 - **SQL Server: `EnqueueManyAsync` without a transaction and with more than 200 messages** begins its own transaction on your
@@ -413,6 +425,8 @@ want a small dependency whose failure behaviour is documented and tested.
 | [Architecture](docs/architecture.md) | Components, state machine, claim SQL, design decisions |
 | [PostgreSQL](docs/postgres.md) | Schema, indexes, permissions, autovacuum, migration tools |
 | [SQL Server](docs/sqlserver.md) | RCSI, index hints, `QUOTED_IDENTIFIER`, `sqlcmd -I` |
+| [Oracle](docs/oracle.md) | Schemas are users, function-based indexes, empty strings |
+| [MySQL and MariaDB](docs/mysql.md) | Schemas are databases, generated-column indexes, `max_allowed_packet` |
 | [Reliability](docs/reliability.md) | Every guarantee and the test that proves it |
 | [Troubleshooting](docs/troubleshooting.md) | Stuck messages, lost leases, dead letters, health states, requeue |
 | [Migrating from a hand-rolled outbox](docs/migrating-from-hand-rolled-outbox.md) | The classic bugs and how DbRelay handles them |

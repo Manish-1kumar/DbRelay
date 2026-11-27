@@ -4,8 +4,8 @@
 (Dapper or plain ADO.NET). A background dispatcher delivers it to one interface you implement, **at least once**, with
 database-clock leases, lock-token fencing, retries with jitter and dead-lettering.
 
-- Packages: `DbRelay.Abstractions` (contracts, no dependencies), `DbRelay` (engine), and one provider: `DbRelay.PostgreSql`
-  or `DbRelay.SqlServer`. Each provider brings in the other two.
+- Packages: `DbRelay.Abstractions` (contracts, no dependencies), `DbRelay` (engine), and one provider: `DbRelay.PostgreSql`,
+  `DbRelay.SqlServer`, `DbRelay.Oracle` or `DbRelay.MySql` (MySQL and MariaDB). Each provider brings in the other two.
 - Targets .NET 8, 9, 10 and 11. No EF Core, no broker or messaging framework required.
 
 ## Quick start (PostgreSQL)
@@ -91,6 +91,8 @@ need `QUOTED_IDENTIFIER ON`, and the provider uses index hints.
 - [Reliability guarantees and the tests that prove them](https://github.com/Manish-1kumar/DbRelay/blob/main/docs/reliability.md)
 - [PostgreSQL guide](https://github.com/Manish-1kumar/DbRelay/blob/main/docs/postgres.md)
 - [SQL Server guide](https://github.com/Manish-1kumar/DbRelay/blob/main/docs/sqlserver.md)
+- [Oracle guide](https://github.com/Manish-1kumar/DbRelay/blob/main/docs/oracle.md)
+- [MySQL and MariaDB guide](https://github.com/Manish-1kumar/DbRelay/blob/main/docs/mysql.md)
 - [Troubleshooting](https://github.com/Manish-1kumar/DbRelay/blob/main/docs/troubleshooting.md)
 - [Changelog](https://github.com/Manish-1kumar/DbRelay/blob/main/CHANGELOG.md)
 

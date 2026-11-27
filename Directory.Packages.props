@@ -46,6 +46,8 @@
     <PackageVersion Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="$(MicrosoftExtensionsHealthChecksVersion)" />
     <PackageVersion Include="Npgsql" Version="10.0.4" />
     <PackageVersion Include="Microsoft.Data.SqlClient" Version="7.1.2" />
+    <PackageVersion Include="Oracle.ManagedDataAccess.Core" Version="23.26.401" />
+    <PackageVersion Include="MySqlConnector" Version="2.6.2" />
   </ItemGroup>
 
   <ItemGroup Label="Test, sample and benchmark dependencies">

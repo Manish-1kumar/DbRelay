@@ -1,0 +1,73 @@
+name: Soak (Oracle)
+
+# On-demand soak/chaos run of tests/DbRelay.Soak against Oracle Database 23ai Free. GitHub-hosted jobs are limited to 6 hours,
+# so the default load phase is 320 minutes, leaving time for the database to start and for the drain and verification.
+# PostgreSQL and SQL Server soaks run on a developer machine (docs/soak/README.md).
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Load phase in minutes (the job limit is 360 minutes in total)"
+        default: "320"
+      rate:
+        description: "Base rate in messages per second (with a 10x burst for 20 s every 5 minutes)"
+        default: "1.7"
+      workers:
+        description: "Worker processes"
+        default: "3"
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  # Ephemeral container credential; not a secret.
+  ORACLE_PASSWORD: "DbRelay_CI_Pa55w0rd"
+
+jobs:
+  soak-oracle:
+    name: Oracle soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    services:
+      oracle:
+        image: gvenzl/oracle-free:23-slim-faststart
+        env:
+          ORACLE_PASSWORD: ${{ env.ORACLE_PASSWORD }}
+        ports: ["1521:1521"]
+        options: >-
+          --health-cmd healthcheck.sh --health-interval 10s --health-timeout 5s --health-retries 60
+    env:
+      DBRELAY_TEST_ORACLE: "User Id=system;Password=DbRelay_CI_Pa55w0rd;Data Source=localhost:1521/FREEPDB1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            10.0.x
+            11.0.x
+      - name: Settings
+        id: settings
+        run: |
+          minutes="${{ inputs.minutes }}"; rate="${{ inputs.rate }}"; workers="${{ inputs.workers }}"
+          echo "minutes=${minutes:-320}" >> "$GITHUB_OUTPUT"; echo "rate=${rate:-1.7}" >> "$GITHUB_OUTPUT"; echo "workers=${workers:-3}" >> "$GITHUB_OUTPUT"
+          echo "Soak: ${minutes:-320} minutes, rate ${rate:-1.7}, ${workers:-3} workers"
+      - name: Build the soak harness
+        run: dotnet build tests/DbRelay.Soak -c Release
+      - name: Soak
+        run: >-
+          dotnet tests/DbRelay.Soak/bin/Release/net10.0/DbRelay.Soak.dll coordinator --provider Oracle
+          --minutes ${{ steps.settings.outputs.minutes }} --workers ${{ steps.settings.outputs.workers }}
+          --rate ${{ steps.settings.outputs.rate }} --report soak-oracle.md
+      - name: Report
+        if: always()
+        run: cat soak-oracle.md || true
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: soak-oracle
+          path: |
+            soak-oracle.md
+            /tmp/dbrelay-soak_*/*.log
+          if-no-files-found: warn

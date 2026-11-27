@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DbRelay.Oracle</RootNamespace>
+    <Description>Oracle storage provider for DbRelay (ODP.NET Core): transactional outbox inserts in the caller's OracleTransaction, FOR UPDATE SKIP LOCKED claiming with leases and lock tokens, retention cleanup and explicit, idempotent schema creation. Oracle Database 19c and later.</Description>
+    <PackageTags>$(PackageTags);oracle</PackageTags>
+    <!-- First published in 0.3.0, so there is no earlier package to validate its API against. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DbRelay\DbRelay.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Oracle.ManagedDataAccess.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Scripts\001_create_outbox.sql" LogicalName="DbRelay.Oracle.Scripts.001_create_outbox.sql" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DbRelay.Oracle.Tests" />
+  </ItemGroup>
+
+</Project>

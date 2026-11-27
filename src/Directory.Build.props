@@ -11,9 +11,9 @@
     <!--
       Packages already on nuget.org are compared with their last release, so `dotnet pack` fails on an unintended breaking
       change. Pre-1.0 an intended break is allowed: suppress that diagnostic deliberately and record it in the CHANGELOG.
-      DbRelay.SqlServer has no published baseline before 0.2.0.
+      DbRelay.Oracle and DbRelay.MySql are first published in 0.3.0, so they have no baseline yet.
     -->
-    <PackageValidationBaselineVersion Condition="'$(MSBuildProjectName)' != 'DbRelay.SqlServer'">0.1.0</PackageValidationBaselineVersion>
+    <PackageValidationBaselineVersion Condition="'$(MSBuildProjectName)' != 'DbRelay.Oracle' and '$(MSBuildProjectName)' != 'DbRelay.MySql'">0.2.0</PackageValidationBaselineVersion>
 
     <!-- Package metadata -->
     <Authors>DbRelay contributors</Authors>

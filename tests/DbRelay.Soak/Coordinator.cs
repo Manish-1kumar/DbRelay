@@ -18,18 +18,22 @@ public static class Coordinator
     public static async Task<int> RunAsync(Provider provider, TimeSpan duration, int workerCount, string reportPath, double messagesPerSecond, bool keep)
     {
         var schema = "soak_" + Guid.NewGuid().ToString("N")[..12];
+        Environment.SetEnvironmentVariable("DBRELAY_SOAK_WORKER_PASSWORD", "Soak" + Guid.NewGuid().ToString("N")[..20]); // Oracle worker user, inherited by workers
         var db = new SoakDatabase(provider, schema);
         var workDir = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "dbrelay-" + schema)).FullName;
         var stats = new RunStats();
         var started = DateTimeOffset.UtcNow;
         Log($"Soak {schema}: provider {provider}, {duration}, {workerCount} workers, ~{messagesPerSecond} msg/s, work dir {workDir}");
 
+        await db.PrepareAsync();
         await using var producerServices = CreateProducerServices(db);
         await producerServices.GetRequiredService<IOutboxSchemaManager>().EnsureCreatedAsync();
         await using (var connection = await db.OpenAsync("soak-setup"))
         {
             await connection.ExecuteAsync(db.CreateTablesSql);
         }
+
+        await db.GrantWorkersAsync();
 
         var workers = new List<WorkerProcess>();
         try
@@ -152,7 +156,7 @@ public static class Coordinator
                     : await outbox.EnqueueManyAsync(transaction, messages, stop);
                 for (var i = 0; i < ids.Count; i++)
                 {
-                    await connection.ExecuteAsync(db.InsertOrderSql, new { Id = ids[i], messages[i].Poison }, transaction);
+                    await connection.ExecuteAsync(db.InsertOrderSql, new { Id = db.Id(ids[i]), Poison = db.Bool(messages[i].Poison) }, transaction);
                 }
 
                 if (commit)
@@ -310,18 +314,18 @@ public static class Coordinator
         var outbox = db.T("outbox_messages");
         var orders = db.T("orders");
         var sink = db.T("sink");
-        var no = false;
-        var yes = true;
+        var no = db.Bool(false);
+        var yes = db.Bool(true);
 
         async Task<long> Count(string sql, object? args = null) => await c.ExecuteScalarAsync<long>(sql, args, commandTimeout: 600);
 
         var committed = await Count($"SELECT COUNT(*) FROM {orders}");
         var outboxRows = await Count($"SELECT COUNT(*) FROM {outbox}");
-        var normalDelivered = await Count($"SELECT COUNT(*) FROM {orders} o JOIN {outbox} m ON m.id = o.message_id WHERE o.poison = @no AND m.status = 2", new { no });
-        var normalTotal = await Count($"SELECT COUNT(*) FROM {orders} WHERE poison = @no", new { no });
-        var normalDeadLettered = await Count($"SELECT COUNT(*) FROM {orders} o JOIN {outbox} m ON m.id = o.message_id WHERE o.poison = @no AND m.status = 3", new { no });
-        var poisonTotal = await Count($"SELECT COUNT(*) FROM {orders} WHERE poison = @yes", new { yes });
-        var poisonDead = await Count($"SELECT COUNT(*) FROM {orders} o JOIN {outbox} m ON m.id = o.message_id WHERE o.poison = @yes AND m.status = 3", new { yes });
+        var normalDelivered = await Count($"SELECT COUNT(*) FROM {orders} o JOIN {outbox} m ON m.id = o.message_id WHERE o.poison = {db.P("no")} AND m.status = 2", new { no });
+        var normalTotal = await Count($"SELECT COUNT(*) FROM {orders} WHERE poison = {db.P("no")}", new { no });
+        var normalDeadLettered = await Count($"SELECT COUNT(*) FROM {orders} o JOIN {outbox} m ON m.id = o.message_id WHERE o.poison = {db.P("no")} AND m.status = 3", new { no });
+        var poisonTotal = await Count($"SELECT COUNT(*) FROM {orders} WHERE poison = {db.P("yes")}", new { yes });
+        var poisonDead = await Count($"SELECT COUNT(*) FROM {orders} o JOIN {outbox} m ON m.id = o.message_id WHERE o.poison = {db.P("yes")} AND m.status = 3", new { yes });
         var missingOutbox = await Count($"SELECT COUNT(*) FROM {orders} o WHERE NOT EXISTS (SELECT 1 FROM {outbox} m WHERE m.id = o.message_id)");
         var orphanOutbox = await Count($"SELECT COUNT(*) FROM {outbox} m WHERE NOT EXISTS (SELECT 1 FROM {orders} o WHERE o.message_id = m.id)");
         var stuck = await Count($"SELECT COUNT(*) FROM {outbox} WHERE status IN (0, 1)");
@@ -331,16 +335,14 @@ public static class Coordinator
         var sinkRows = await Count($"SELECT COUNT(*) FROM {sink}");
         var sinkDistinct = await Count($"SELECT COUNT(DISTINCT message_id) FROM {sink}");
         var sunkButNotDelivered = await Count($"SELECT COUNT(DISTINCT s.message_id) FROM {sink} s JOIN {outbox} m ON m.id = s.message_id WHERE m.status <> 2");
-        var poisonSunk = await Count($"SELECT COUNT(DISTINCT s.message_id) FROM {sink} s JOIN {orders} o ON o.message_id = s.message_id WHERE o.poison = @yes", new { yes });
+        var poisonSunk = await Count($"SELECT COUNT(DISTINCT s.message_id) FROM {sink} s JOIN {orders} o ON o.message_id = s.message_id WHERE o.poison = {db.P("yes")}", new { yes });
 
-        var outboxIds = (await c.QueryAsync<Guid>($"SELECT id FROM {outbox}", commandTimeout: 600)).ToHashSet();
-        var sinkIds = (await c.QueryAsync<Guid>($"SELECT DISTINCT message_id FROM {sink}", commandTimeout: 600)).ToHashSet();
+        var outboxIds = await db.QueryIdsAsync(c, $"SELECT {db.IdExpr("id")} FROM {outbox}");
+        var sinkIds = await db.QueryIdsAsync(c, $"SELECT DISTINCT {db.IdExpr("message_id")} FROM {sink}");
         var rolledBackInOutbox = rolledBack.Count(outboxIds.Contains);
         var rolledBackDelivered = rolledBack.Count(sinkIds.Contains);
 
-        var latencySql = db.Provider == Provider.PostgreSql
-            ? $"SELECT EXTRACT(EPOCH FROM delivered_at - created_at) * 1000.0 FROM {outbox} WHERE status = 2"
-            : $"SELECT CAST(DATEDIFF_BIG(millisecond, created_at, delivered_at) AS float) FROM {outbox} WHERE status = 2";
+        var latencySql = db.LatencySql(outbox);
         var latencies = (await c.QueryAsync<double>(latencySql, commandTimeout: 600)).OrderBy(x => x).ToArray();
         double P(double q) => latencies.Length == 0 ? 0 : latencies[Math.Min(latencies.Length - 1, (int)(q * latencies.Length))];
 

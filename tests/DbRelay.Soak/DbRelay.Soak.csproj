@@ -1,8 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    Long-running soak / chaos harness (not a test project; not run by CI). See Program.cs for usage.
-    Requires DBRELAY_TEST_POSTGRES or DBRELAY_TEST_SQLSERVER.
+    Long-running soak / chaos harness (not a test project; not part of the regular CI run). See Program.cs for usage.
+    Requires DBRELAY_TEST_POSTGRES, DBRELAY_TEST_SQLSERVER or DBRELAY_TEST_ORACLE. The Oracle soak runs on demand in GitHub
+    Actions (.github/workflows/soak.yml).
   -->
 
   <PropertyGroup>
@@ -19,6 +20,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\DbRelay.PostgreSql\DbRelay.PostgreSql.csproj" />
     <ProjectReference Include="..\..\src\DbRelay.SqlServer\DbRelay.SqlServer.csproj" />
+    <ProjectReference Include="..\..\src\DbRelay.Oracle\DbRelay.Oracle.csproj" />
+    <ProjectReference Include="..\..\src\DbRelay.MySql\DbRelay.MySql.csproj" />
   </ItemGroup>
 
   <ItemGroup>

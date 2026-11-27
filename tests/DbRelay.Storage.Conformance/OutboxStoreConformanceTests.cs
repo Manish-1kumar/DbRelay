@@ -64,6 +64,15 @@ public abstract class OutboxStoreConformanceTests : IAsyncLifetime
     /// <summary>Drops <paramref name="schema"/> and everything in it.</summary>
     protected abstract Task DropSchemaAsync(string schema);
 
+    /// <summary>
+    /// Runs before the outbox schema is created. Override when the provider's schema creation needs the schema to exist already
+    /// (Oracle: a schema is a user, which DbRelay never creates).
+    /// </summary>
+    protected virtual Task PrepareSchemaAsync(string schema) => Task.CompletedTask;
+
+    /// <summary>The configured schema name as the provider writes it in its create script (Oracle: upper case).</summary>
+    protected virtual string SchemaNameInScript(string schema) => schema;
+
     // ---- Lifecycle ---------------------------------------------------------------------------------------------------
 
     public async ValueTask InitializeAsync()
@@ -82,6 +91,7 @@ public abstract class OutboxStoreConformanceTests : IAsyncLifetime
         });
         _services = services.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true, ValidateScopes = true });
 
+        await PrepareSchemaAsync(Schema);
         await SchemaManager.EnsureCreatedAsync(Ct);
         await using var connection = await OpenConnectionAsync();
         await connection.ExecuteAsync(CreateOrdersTableSql(Schema));
@@ -101,7 +111,12 @@ public abstract class OutboxStoreConformanceTests : IAsyncLifetime
 
     private void RequireDatabase() => Assert.SkipWhen(SkipReason is not null, SkipReason ?? string.Empty);
 
-    private string InsertOrderSql => $"INSERT INTO {Schema}.orders (id, note) VALUES (@Id, @Note)";
+    /// <summary>
+    /// Inserts a row into the business table with the caller's connection and transaction. Override when the provider uses another
+    /// parameter syntax or GUID representation (Oracle: <c>:name</c> and <c>RAW(16)</c>).
+    /// </summary>
+    protected virtual Task InsertOrderAsync(DbConnection connection, DbTransaction? transaction, string note) =>
+        connection.ExecuteAsync($"INSERT INTO {Schema}.orders (id, note) VALUES (@Id, @Note)", new { Id = Guid.NewGuid(), Note = note }, transaction);
 
     /// <summary>
     /// Counts committed rows in the business table from a separate connection without blocking on uncommitted rows
@@ -138,7 +153,7 @@ public abstract class OutboxStoreConformanceTests : IAsyncLifetime
     {
         RequireDatabase();
         var script = SchemaManager.GetCreateScript();
-        Assert.Contains(Schema, script, StringComparison.Ordinal);
+        Assert.Contains(SchemaNameInScript(Schema), script, StringComparison.Ordinal);
         Assert.DoesNotContain("DROP ", script, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -159,7 +174,7 @@ public abstract class OutboxStoreConformanceTests : IAsyncLifetime
         await using (var connection = await OpenConnectionAsync())
         await using (var transaction = await connection.BeginTransactionAsync(Ct))
         {
-            await connection.ExecuteAsync(InsertOrderSql, new { Id = Guid.NewGuid(), Note = "order" }, transaction);
+            await InsertOrderAsync(connection, transaction, "order");
             messageId = await Outbox.EnqueueAsync(transaction, new TestMessage("committed"), Ct);
             await transaction.CommitAsync(Ct);
         }
@@ -179,7 +194,7 @@ public abstract class OutboxStoreConformanceTests : IAsyncLifetime
         await using (var connection = await OpenConnectionAsync())
         await using (var transaction = await connection.BeginTransactionAsync(Ct))
         {
-            await connection.ExecuteAsync(InsertOrderSql, new { Id = Guid.NewGuid(), Note = "order" }, transaction);
+            await InsertOrderAsync(connection, transaction, "order");
             messageId = await Outbox.EnqueueAsync(transaction, new TestMessage("rolled back"), Ct);
             await transaction.RollbackAsync(Ct);
         }
@@ -217,7 +232,7 @@ public abstract class OutboxStoreConformanceTests : IAsyncLifetime
         Assert.Same(connection, transaction.Connection);
 
         // The transaction is still active and usable for more business work.
-        await connection.ExecuteAsync(InsertOrderSql, new { Id = Guid.NewGuid(), Note = "after enqueue" }, transaction);
+        await InsertOrderAsync(connection, transaction, "after enqueue");
         Assert.Equal(0, await CountOrdersAsync()); // not committed by DbRelay
 
         await transaction.CommitAsync(Ct);
@@ -233,7 +248,7 @@ public abstract class OutboxStoreConformanceTests : IAsyncLifetime
 
         await using var connection = await OpenConnectionAsync();
         await using var transaction = await connection.BeginTransactionAsync(Ct);
-        await connection.ExecuteAsync(InsertOrderSql, new { Id = Guid.NewGuid(), Note = "order" }, transaction);
+        await InsertOrderAsync(connection, transaction, "order");
 
         await Assert.ThrowsAnyAsync<DbException>(() =>
             Outbox.EnqueueAsync(transaction, new TestMessage("duplicate"), new EnqueueOptions { MessageId = id }, Ct));

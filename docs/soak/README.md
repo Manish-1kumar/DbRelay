@@ -19,6 +19,10 @@ Worker `w0` is never killed, so its memory, threads and handles can be tracked o
 dotnet run -c Release --project tests/DbRelay.Soak -- coordinator --provider PostgreSql --minutes 120 --workers 3 --rate 40 --report soak.md
 ```
 
+Oracle and MySQL soaks run on GitHub Actions (`.github/workflows/soak.yml` and `soak-mysql.yml`), with the database in a service
+container. GitHub limits a job to 6 hours, so their load phase is 5 h 20 min. For Oracle and MySQL, workers connect as a throwaway
+database user whose sessions the chaos loop kills.
+
 The connection strings come from `DBRELAY_TEST_POSTGRES` / `DBRELAY_TEST_SQLSERVER`. Each run uses its own `soak_*` schema and
 drops it afterwards (pass `--keep` to keep it).
 
@@ -31,6 +35,10 @@ drops it afterwards (pass `--keep` to keep it).
 | 2026-11-22 | PostgreSQL 17.5 (BA fixes) | 30 min | 76,624 | 26 / 16 | 778 | 0 | 0 | 808 ms | **PASS 9/9** | [report](2026-11-22-postgresql-30min-fixed.md) |
 | 2026-11-22 | SQL Server 2022 Express (0.2 backlog) | 30 min | 67,544 | 30 / 13 | 514 | 0 | 0 | 861 ms | **PASS 9/9** | [report](2026-11-22-sqlserver-30min-0.2-backlog.md) |
 | 2026-11-22 | PostgreSQL 17.5 (0.2 backlog) | 30 min | 71,522 | 29 / 15 | 831 | 0 | 0 | 1,397 ms | **PASS 9/9** | [report](2026-11-22-postgresql-30min-0.2-backlog.md) |
+| 2026-11-27 | PostgreSQL 17 (0.2.0 code) | 6 h | 37,262 (+9,121 rolled back) | 354 / 147 | 5,659 | 0 | 2 | 1,353 ms | **PASS 9/9** | [report](2026-11-27-postgresql-360min.md) |
+| 2026-11-27 | Oracle 23ai Free (GitHub Actions) | 5 h 20 min | 38,797 (+9,909 rolled back) | 337 / 121 | 5,130 | 0 | 0 | 349 ms | **PASS 9/9** | [report](2026-11-27-oracle-320min.md) |
+| 2026-11-27 | MySQL 8.4 (GitHub Actions, before the MySQL review fixes) | 5 h 20 min | 39,218 (+9,637 rolled back) | 311 / 147 | 2,406 | 0 | 1 | 341 ms | **PASS 9/9** | [report](2026-11-27-mysql-320min-pre-review.md) |
+| 2026-11-27 | MySQL 8.4 (GitHub Actions, reviewed code) | 5 h 20 min | 39,101 (+10,020 rolled back) | 318 / 135 | 2,590 | 0 | 0 | 350 ms | **PASS 9/9** | [report](2026-11-27-mysql-320min.md) |
 
 The "0.2 backlog" runs use the code after these changes:
 - the payload budgets (CR-18);
