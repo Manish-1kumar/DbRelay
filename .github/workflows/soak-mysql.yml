@@ -1,6 +1,6 @@
 name: Soak (MySQL)
 
-# On-demand soak/chaos run of tests/DbRelay.Soak against MySQL 8.4 LTS. GitHub-hosted jobs are limited to 6 hours, so the default
+# On-demand soak/chaos run of tests/DbRelay.Soak against MySQL 8.4 LTS (default) or MariaDB (image input, e.g. mariadb:11.8). GitHub-hosted jobs are limited to 6 hours, so the default
 # load phase is 320 minutes, leaving time for the drain and verification.
 on:
   workflow_dispatch:
@@ -14,6 +14,9 @@ on:
       workers:
         description: "Worker processes"
         default: "3"
+      image:
+        description: "Database image: mysql:8.4 (default), or a MariaDB image such as mariadb:11.8"
+        default: "mysql:8.4"
 
 permissions:
   contents: read
@@ -26,17 +29,18 @@ env:
 
 jobs:
   soak-mysql:
-    name: MySQL soak
+    name: Soak (${{ inputs.image || 'mysql:8.4' }})
     runs-on: ubuntu-latest
     timeout-minutes: 358
     services:
       mysql:
-        image: mysql:8.4
+        image: ${{ inputs.image || 'mysql:8.4' }}
         env:
           MYSQL_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
+          MARIADB_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
         ports: ["3306:3306"]
         options: >-
-          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -p$MYSQL_ROOT_PASSWORD --silent" --health-interval 5s --health-timeout 5s --health-retries 40
+          --health-cmd "${{ startsWith(inputs.image, 'mariadb') && 'healthcheck.sh --connect --innodb_initialized' || 'mysqladmin ping -h 127.0.0.1 -uroot -pDbRelay_CI_Pa55w0rd --silent' }}" --health-interval 5s --health-timeout 5s --health-retries 40
     env:
       DBRELAY_TEST_MYSQL: "Server=127.0.0.1;Port=3306;User ID=root;Password=DbRelay_CI_Pa55w0rd;SslMode=Preferred;AllowPublicKeyRetrieval=true"
     steps:
@@ -52,6 +56,8 @@ jobs:
           minutes="${{ inputs.minutes }}"; rate="${{ inputs.rate }}"; workers="${{ inputs.workers }}"
           echo "minutes=${minutes:-320}" >> "$GITHUB_OUTPUT"; echo "rate=${rate:-1.7}" >> "$GITHUB_OUTPUT"; echo "workers=${workers:-3}" >> "$GITHUB_OUTPUT"
           echo "Soak: ${minutes:-320} minutes, rate ${rate:-1.7}, ${workers:-3} workers"
+      - name: Record the server version
+        run: docker exec ${{ job.services.mysql.id }} sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SELECT VERSION()" 2>/dev/null || mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -e "SELECT VERSION()"' || true
       - name: Build the soak harness
         run: dotnet build tests/DbRelay.Soak -c Release
       - name: Soak
